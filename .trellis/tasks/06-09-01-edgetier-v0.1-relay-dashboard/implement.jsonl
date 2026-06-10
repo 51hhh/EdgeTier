@@ -1,0 +1,11 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/tasks/06-09-01-edgetier-v0.1-relay-dashboard/prd.md", "reason": "Requirements for EdgeTier v0.1 implementation"}
+{"file": ".trellis/tasks/06-09-01-edgetier-v0.1-relay-dashboard/research/summary.md", "reason": "Research summary and technical decisions"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Cross-layer data flow guidance"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Reuse and duplication guidance"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Backend spec placeholder for structure conventions"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Backend error handling guidance"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Backend quality guidance"}
+{"file": ".trellis/spec/frontend/component-guidelines.md", "reason": "Frontend component guidance"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "Frontend state guidance"}
+{"file": ".trellis/spec/frontend/type-safety.md", "reason": "Frontend type safety guidance"}

@@ -1,0 +1,21 @@
+name = "edgetier"
+main = "src/worker/index.ts"
+compatibility_date = "2026-06-09"
+compatibility_flags = ["nodejs_compat"]
+
+[assets]
+directory = "dist/client"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+[[durable_objects.bindings]]
+name = "RELAY_ROOM"
+class_name = "RelayRoom"
+
+[[durable_objects.bindings]]
+name = "DIRECTORY"
+class_name = "Directory"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RelayRoom", "Directory"]

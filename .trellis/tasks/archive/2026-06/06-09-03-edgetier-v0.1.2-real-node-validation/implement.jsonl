@@ -1,0 +1,7 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/tasks/06-09-03-edgetier-v0.1.2-real-node-validation/prd.md", "reason": "v0.1.2 real-node validation requirements"}
+{"file": ".trellis/tasks/06-09-03-edgetier-v0.1.2-real-node-validation/validation-report.md", "reason": "Validation report template to update with sanitized results"}
+{"file": "docs/roadmap.md", "reason": "Version sequence and decision gates"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Protocol and deployment quality constraints"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Worker and route contracts"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "API and packet error behavior"}
