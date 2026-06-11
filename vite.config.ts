@@ -11,8 +11,8 @@ export default defineConfig({
     emptyOutDir: true,
   },
   test: {
-    include: ['../**/*.{test,spec}.?(c|m)[jt]s?(x)'],
-    exclude: ['../../node_modules/**', '../../dist/**', '../../research/**'],
+    include: ['./**/*.{test,spec}.?(c|m)[jt]s?(x)', '../**/*.{test,spec}.?(c|m)[jt]s?(x)'],
+    exclude: ['**/node_modules/**', '../../dist/**', '../../research/**'],
   },
   server: {
     proxy: {

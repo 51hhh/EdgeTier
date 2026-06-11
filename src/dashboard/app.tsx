@@ -1,12 +1,23 @@
 import React, { FormEvent, useEffect, useMemo, useState } from 'react';
-import { Badge, Button, Empty, Input, LayerCard, Table, Text, cn } from '@cloudflare/kumo';
+import { Badge, Button, Empty, Input, LayerCard, Tabs, Text } from '@cloudflare/kumo';
 import { createRoomRelayToken, getRoom, getRoomEvents, getRoomTraffic, getRooms, logout } from './api';
-import { eventBadgeVariant, formatBytes } from './format';
 import { ROOM_NAME_PATTERN } from '../easytier/constants';
 import type { DirectoryRoomSummary, RoomSnapshot } from '../observer/types';
+import { Overview } from './components/Overview';
+import { PeerDetail, PeerTable } from './components/Devices';
+import { Logs } from './components/Logs';
+import { ConfigGenerator } from './components/ConfigGenerator';
 import './styles.css';
 
+const TABS = [
+  { value: 'overview', label: 'Overview' },
+  { value: 'devices', label: 'Devices' },
+  { value: 'logs', label: 'Logs' },
+  { value: 'config', label: 'Config' },
+];
+
 export function App() {
+  const [tab, setTab] = useState('overview');
   const [rooms, setRooms] = useState<DirectoryRoomSummary[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [lookup, setLookup] = useState('');
@@ -14,6 +25,7 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [lookupError, setLookupError] = useState<string | null>(null);
   const [lastRefreshed, setLastRefreshed] = useState<string | null>(null);
+  const [selectedSession, setSelectedSession] = useState<string | null>(null);
   const [relayUri, setRelayUri] = useState<{ room: string; uri: string; expiresAt: string } | null>(null);
   const [tokenError, setTokenError] = useState<string | null>(null);
 
@@ -43,21 +55,11 @@ export function App() {
     return () => clearInterval(timer);
   }, [selected]);
 
-  const totals = useMemo(() => {
-    const activeRooms = rooms.filter((item) => item.active);
-    return {
-      activeRoomCount: activeRooms.length,
-      staleRoomCount: rooms.length - activeRooms.length,
-      activePeers: activeRooms.reduce((sum, item) => sum + item.peerCount, 0),
-      websockets: activeRooms.reduce((sum, item) => sum + item.websocketCount, 0),
-      bytes: activeRooms.reduce((sum, item) => sum + item.bytes, 0),
-    };
-  }, [rooms]);
-
   const selectRoom = (roomId: string) => {
     setSelected(roomId);
     setLookup(roomId);
     setLookupError(null);
+    setSelectedSession(null);
   };
 
   const submitLookup = (event: FormEvent<HTMLFormElement>) => {
@@ -90,74 +92,87 @@ export function App() {
   };
 
   const selectedListedRoom = selected ? rooms.find((item) => item.roomId === selected) : undefined;
+  const selectedPeer = useMemo(
+    () => (room && selectedSession ? room.peers.find((peer) => peer.sessionId === selectedSession) : undefined),
+    [room, selectedSession],
+  );
 
   return <main className="shell bg-kumo-canvas text-kumo-default">
     <header className="hero">
       <div className="hero-row">
         <div>
-          <Text as="p" variant="secondary" size="sm">Cloudflare edge relay observer skeleton for EasyTier private testing</Text>
-          <Text as="h1" variant="heading1">EdgeTier Dashboard</Text>
-          <Text as="p" variant="secondary">Read-only v0.1.1 observer. Real EasyTier compatibility remains future validation work.</Text>
+          <Text as="p" variant="secondary" size="sm">Cloudflare edge relay observer for EasyTier private mesh</Text>
+          <Text as="h1" variant="heading1">EdgeTier</Text>
         </div>
         <Button type="button" variant="ghost" onClick={signOut}>Sign out</Button>
       </div>
+      <Tabs variant="underline" tabs={TABS} value={tab} onValueChange={setTab} />
+      <Text as="p" variant="secondary" size="sm">{lastRefreshed ? `Last refreshed ${lastRefreshed}` : 'Loading…'}{selected ? ` · room ${selected}` : ' · no room selected'}</Text>
     </header>
 
     {error && <section className="error-banner text-kumo-danger" role="alert">{error}. Previous successful data is still shown when available.</section>}
 
-    <section className="grid cards" aria-label="recent activity overview">
-      <Metric label="Recently active rooms" value={totals.activeRoomCount} />
-      <Metric label="Stale rooms" value={totals.staleRoomCount} />
-      <Metric label="Active peers" value={totals.activePeers} />
-      <Metric label="Active relay bytes" value={formatBytes(totals.bytes)} />
-    </section>
+    {tab === 'overview' && <Overview rooms={rooms} room={room} />}
 
-    <LayerCard>
-      <LayerCard.Secondary>Room lookup {lastRefreshed ? `last refreshed ${lastRefreshed}` : 'not refreshed yet'}</LayerCard.Secondary>
+    {tab === 'devices' && <div className="stack">
+      <LayerCard>
+        <LayerCard.Secondary>Rooms <Badge variant="outline">recent activity directory</Badge></LayerCard.Secondary>
+        <LayerCard.Primary>
+          <form className="lookup" onSubmit={submitLookup}>
+            <Input label="Inspect a known room" value={lookup} onChange={(e) => setLookup(e.target.value)} placeholder="home-mesh" variant={lookupError ? 'error' : 'default'} />
+            <Button type="submit" variant="primary">Open room</Button>
+          </form>
+          {lookupError && <Text as="p" variant="error" role="alert">{lookupError}</Text>}
+          {rooms.length === 0
+            ? <Empty title="No rooms observed yet" description="Connect EasyTier WebSocket clients via the Config tab, or look up a known room above." />
+            : <div className="room-chips">
+              {rooms.map((item) => (
+                <Button key={item.roomId} type="button" variant={item.roomId === selected ? 'primary' : 'outline'} onClick={() => selectRoom(item.roomId)} aria-pressed={item.roomId === selected}>
+                  {item.roomId} · {item.peerCount}p {item.active ? '' : '(stale)'}
+                </Button>
+              ))}
+            </div>}
+        </LayerCard.Primary>
+      </LayerCard>
+
+      {selected && !selectedListedRoom && <section className="notice text-kumo-subtle">Room <strong>{selected}</strong> is open from manual lookup but has not appeared in the directory yet. If all counters are empty, it may be unobserved or mistyped.</section>}
+
+      <LayerCard>
+        <LayerCard.Secondary>Devices {room ? <Badge variant="outline">{room.websocketCount} websockets</Badge> : null}</LayerCard.Secondary>
+        <LayerCard.Primary>
+          {room
+            ? <PeerTable peers={room.peers} selectedSession={selectedSession} onSelect={setSelectedSession} />
+            : <Empty title="No room selected" description="Choose or look up a room to list its devices." />}
+        </LayerCard.Primary>
+      </LayerCard>
+
+      {selectedPeer && <PeerDetail peer={selectedPeer} />}
+
+      <LayerCard>
+        <LayerCard.Secondary>Relay token <Badge variant="outline">short lived</Badge></LayerCard.Secondary>
+        <LayerCard.Primary>
+          <div className="stack">
+            <Text as="p" variant="secondary">Issue a room-scoped WSS URI for EasyTier clients that can only use a query-string token.</Text>
+            <div><Button type="button" variant="outline" onClick={issueRelayToken} disabled={!selected}>Issue token for selected room</Button></div>
+            {tokenError && <Text as="p" variant="error" role="alert">{tokenError}</Text>}
+            {relayUri && <div className="token-output">
+              <Text as="p" variant="secondary" size="sm">Room {relayUri.room}; expires {relayUri.expiresAt}. Treat this URI as a secret.</Text>
+              <code>{relayUri.uri}</code>
+            </div>}
+          </div>
+        </LayerCard.Primary>
+      </LayerCard>
+    </div>}
+
+    {tab === 'logs' && <LayerCard>
+      <LayerCard.Secondary>Logs {room ? <Badge variant="outline">{room.roomId}</Badge> : null}</LayerCard.Secondary>
       <LayerCard.Primary>
-      <form className="lookup" onSubmit={submitLookup}>
-        <Input label="Inspect a known room" value={lookup} onChange={(event) => setLookup(event.target.value)} placeholder="home-mesh" variant={lookupError ? 'error' : 'default'} />
-        <Button type="submit" variant="primary">Open room</Button>
-      </form>
-      {lookupError && <Text as="p" variant="error" role="alert">{lookupError}</Text>}
-      <Text as="p" variant="secondary">Manual lookup is read-only. A valid but unobserved room can be inspected before it appears in the directory.</Text>
+        {room
+          ? <Logs events={room.recentEvents} />
+          : <Empty title="No room selected" description="Choose a room in Devices to view its relay logs." />}
       </LayerCard.Primary>
-    </LayerCard>
+    </LayerCard>}
 
-    <LayerCard>
-      <LayerCard.Secondary>Private WebSocket token <Badge variant="outline">short lived</Badge></LayerCard.Secondary>
-      <LayerCard.Primary>
-        <div className="relay-token">
-          <Text as="p" variant="secondary">Issue a room-scoped WSS URI for EasyTier clients that can only use a query-string token.</Text>
-          <Button type="button" variant="outline" onClick={issueRelayToken} disabled={!selected}>Issue token for selected room</Button>
-          {tokenError && <Text as="p" variant="error" role="alert">{tokenError}</Text>}
-          {relayUri && <div className="token-output">
-            <Text as="p" variant="secondary">Room {relayUri.room}; expires {relayUri.expiresAt}. Treat this URI as a secret and do not commit it.</Text>
-            <code>{relayUri.uri}</code>
-          </div>}
-        </div>
-      </LayerCard.Primary>
-    </LayerCard>
-
-    <LayerCard>
-      <LayerCard.Secondary>Rooms <Badge variant="outline">recent activity directory</Badge></LayerCard.Secondary>
-      <LayerCard.Primary>
-      {rooms.length === 0 ? <Empty title="No rooms observed yet" description="Connect EasyTier WebSocket clients to /ws?room=<room>, or use manual lookup for a known room." /> : <Table layout="auto"><Table.Header><Table.Row><Table.Head>Room</Table.Head><Table.Head>Status</Table.Head><Table.Head>Peers</Table.Head><Table.Head>Bytes</Table.Head><Table.Head>Last activity</Table.Head></Table.Row></Table.Header><Table.Body>{rooms.map((item) => <Table.Row key={item.roomId} variant={item.roomId === selected ? 'selected' : 'default'} className={cn(item.roomId === selected && 'selected-row')}><Table.Cell><Button type="button" variant="ghost" onClick={() => selectRoom(item.roomId)} aria-pressed={item.roomId === selected}><Badge variant="outline">{item.roomId}</Badge></Button></Table.Cell><Table.Cell><Badge variant={item.active ? 'primary' : 'secondary'}>{item.active ? 'recently active' : 'stale'}</Badge></Table.Cell><Table.Cell>{item.peerCount}</Table.Cell><Table.Cell>{formatBytes(item.bytes)}</Table.Cell><Table.Cell>{item.lastActivity ?? 'none'}</Table.Cell></Table.Row>)}</Table.Body></Table>}
-      </LayerCard.Primary>
-    </LayerCard>
-
-    {selected && !selectedListedRoom && <section className="notice text-kumo-subtle">Room <strong>{selected}</strong> is open from manual lookup but has not appeared in the recent activity directory. If all counters are empty, it may be unobserved or mistyped.</section>}
-
-    {room ? <><LayerCard>
-      <LayerCard.Secondary>Peers in {room.roomId} <Badge variant="outline">{room.websocketCount} websockets</Badge></LayerCard.Secondary>
-      <LayerCard.Primary>
-      {room.peers.length === 0 ? <Empty title="No peers observed" description="No peers are currently connected or identified in this room." /> : <Table><Table.Header><Table.Row><Table.Head>Peer</Table.Head><Table.Head>Status</Table.Head><Table.Head>Connected</Table.Head><Table.Head>Last seen</Table.Head><Table.Head>RX</Table.Head><Table.Head>TX</Table.Head></Table.Row></Table.Header><Table.Body>{room.peers.map((peer) => <Table.Row key={peer.sessionId}><Table.Cell>{peer.peerId ?? 'unknown'}</Table.Cell><Table.Cell><Badge variant={peer.connected ? 'primary' : 'secondary'}>{peer.connected ? 'connected' : 'offline'}</Badge></Table.Cell><Table.Cell>{peer.connectedAt}</Table.Cell><Table.Cell>{peer.lastSeen}</Table.Cell><Table.Cell>{formatBytes(peer.rxBytes)}</Table.Cell><Table.Cell>{formatBytes(peer.txBytes)}</Table.Cell></Table.Row>)}</Table.Body></Table>}
-      </LayerCard.Primary>
-    </LayerCard>
-    <section className="grid"><LayerCard title="Traffic"><Text>RX {formatBytes(room.traffic.rxBytes)} / TX {formatBytes(room.traffic.txBytes)}</Text><Text variant="secondary">Forwarded {room.traffic.forwardedPackets} packets, unroutable {room.traffic.unroutablePackets}, invalid {room.traffic.invalidPackets}</Text></LayerCard><LayerCard title="Recent events">{room.recentEvents.length === 0 ? <Empty title="No events observed" description="No relay events have been observed for this room yet." /> : <Table><Table.Header><Table.Row><Table.Head>Time</Table.Head><Table.Head>Type</Table.Head><Table.Head>Peer</Table.Head><Table.Head>Message</Table.Head></Table.Row></Table.Header><Table.Body>{room.recentEvents.slice().reverse().map((event) => <Table.Row key={event.id}><Table.Cell>{event.timestamp}</Table.Cell><Table.Cell><Badge variant={eventBadgeVariant(event.type)}>{event.type}</Badge></Table.Cell><Table.Cell>{event.peerId ?? 'unknown'}</Table.Cell><Table.Cell>{event.message}</Table.Cell></Table.Row>)}</Table.Body></Table>}</LayerCard></section></> : <section className="notice text-kumo-subtle">No room selected. Choose a directory room or manually look up a known room to fetch its snapshot.</section>}
+    {tab === 'config' && <ConfigGenerator />}
   </main>;
-}
-
-function Metric({ label, value }: { label: string; value: React.ReactNode }) {
-  return <LayerCard><LayerCard.Secondary>{label}</LayerCard.Secondary><LayerCard.Primary><Text as="strong" variant="heading2">{value}</Text></LayerCard.Primary></LayerCard>;
 }
