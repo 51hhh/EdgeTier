@@ -37,6 +37,7 @@ export class RelayRoom implements DurableObject {
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     server.accept();
+    server.binaryType = 'arraybuffer';
     const now = new Date().toISOString();
     const session: Session = { sessionId: crypto.randomUUID(), roomId, connected: true, connectedAt: now, lastSeen: now, rxBytes: 0, txBytes: 0, rxPackets: 0, txPackets: 0, invalidPackets: 0, ws: server };
     this.sessions.set(session.sessionId, session);
@@ -49,8 +50,9 @@ export class RelayRoom implements DurableObject {
   }
 
   private onMessage(session: Session, event: MessageEvent): void {
-    const frame = typeof event.data === 'string' ? new TextEncoder().encode(event.data).buffer : event.data as ArrayBuffer;
+    const frame = toArrayBuffer(event.data);
     session.lastSeen = new Date().toISOString();
+    if (!frame) return this.invalid(session, 'unsupported websocket frame type');
     session.rxBytes += frame.byteLength;
     session.rxPackets += 1;
     this.traffic.rxBytes += frame.byteLength;
@@ -151,4 +153,22 @@ export class RelayRoom implements DurableObject {
       }),
     });
   }
+}
+
+/**
+ * Normalize a WebSocket message payload to an ArrayBuffer. Cloudflare Workers
+ * delivers binary frames as ArrayBuffer, but text frames and ArrayBufferView
+ * inputs (e.g. a Node `ws` client sending a Buffer) must be handled too. A
+ * Buffer/TypedArray may have a non-zero byteOffset, so slice the exact range.
+ */
+export function toArrayBuffer(data: unknown): ArrayBuffer | null {
+  if (typeof data === 'string') return new TextEncoder().encode(data).buffer;
+  if (data instanceof ArrayBuffer) return data;
+  if (ArrayBuffer.isView(data)) {
+    const view = data as ArrayBufferView;
+    const copy = new Uint8Array(view.byteLength);
+    copy.set(new Uint8Array(view.buffer as ArrayBuffer, view.byteOffset, view.byteLength));
+    return copy.buffer;
+  }
+  return null;
 }
