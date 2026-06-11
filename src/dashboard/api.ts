@@ -1,4 +1,4 @@
-import type { DirectoryRoomSummary, RelayEvent, RoomSnapshot, TrafficSnapshot } from '../observer/types';
+import type { DirectoryRoomSummary, RelayEvent, RelayTokenResponse, RoomSnapshot, TrafficSnapshot } from '../observer/types';
 
 export async function getRooms(): Promise<DirectoryRoomSummary[]> {
   const data = await fetchJson<{ rooms: DirectoryRoomSummary[] }>('/api/rooms');
@@ -18,8 +18,20 @@ export async function getRoomTraffic(roomId: string): Promise<TrafficSnapshot> {
   return fetchJson<TrafficSnapshot>(`/api/rooms/${encodeURIComponent(roomId)}/traffic`);
 }
 
-async function fetchJson<T>(path: string): Promise<T> {
-  const response = await fetch(path);
+export async function createRoomRelayToken(roomId: string): Promise<RelayTokenResponse> {
+  return fetchJson<RelayTokenResponse>(`/api/rooms/${encodeURIComponent(roomId)}/token`, { method: 'POST' });
+}
+
+export async function logout(): Promise<void> {
+  await fetchJson<{ ok: true }>('/api/auth/logout', { method: 'POST' });
+}
+
+async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(path, init);
+  if (response.status === 401) {
+    window.location.href = '/login';
+    throw new Error('Authentication required');
+  }
   if (!response.ok) throw new Error(`Request failed: ${response.status}`);
   return response.json() as Promise<T>;
 }

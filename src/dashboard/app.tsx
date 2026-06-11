@@ -1,6 +1,6 @@
 import React, { FormEvent, useEffect, useMemo, useState } from 'react';
 import { Badge, Button, Empty, Input, LayerCard, Table, Text, cn } from '@cloudflare/kumo';
-import { getRoom, getRoomEvents, getRoomTraffic, getRooms } from './api';
+import { createRoomRelayToken, getRoom, getRoomEvents, getRoomTraffic, getRooms, logout } from './api';
 import { eventBadgeVariant, formatBytes } from './format';
 import { ROOM_NAME_PATTERN } from '../easytier/constants';
 import type { DirectoryRoomSummary, RoomSnapshot } from '../observer/types';
@@ -14,6 +14,8 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [lookupError, setLookupError] = useState<string | null>(null);
   const [lastRefreshed, setLastRefreshed] = useState<string | null>(null);
+  const [relayUri, setRelayUri] = useState<{ room: string; uri: string; expiresAt: string } | null>(null);
+  const [tokenError, setTokenError] = useState<string | null>(null);
 
   useEffect(() => {
     const tick = async () => {
@@ -68,13 +70,37 @@ export function App() {
     selectRoom(roomId);
   };
 
+  const issueRelayToken = async () => {
+    if (!selected) {
+      setTokenError('Choose or look up a room before issuing a WebSocket token.');
+      return;
+    }
+    try {
+      const token = await createRoomRelayToken(selected);
+      setRelayUri({ room: token.room, uri: `${window.location.origin.replace(/^http/, 'ws')}${token.uriPath}`, expiresAt: token.expiresAt });
+      setTokenError(null);
+    } catch (err) {
+      setTokenError(err instanceof Error ? err.message : 'failed to issue relay token');
+    }
+  };
+
+  const signOut = async () => {
+    await logout();
+    window.location.href = '/login';
+  };
+
   const selectedListedRoom = selected ? rooms.find((item) => item.roomId === selected) : undefined;
 
   return <main className="shell bg-kumo-canvas text-kumo-default">
     <header className="hero">
-      <Text as="p" variant="secondary" size="sm">Cloudflare edge relay observer skeleton for EasyTier private testing</Text>
-      <Text as="h1" variant="heading1">EdgeTier Dashboard</Text>
-      <Text as="p" variant="secondary">Read-only v0.1.1 observer. Real EasyTier compatibility remains future validation work.</Text>
+      <div className="hero-row">
+        <div>
+          <Text as="p" variant="secondary" size="sm">Cloudflare edge relay observer skeleton for EasyTier private testing</Text>
+          <Text as="h1" variant="heading1">EdgeTier Dashboard</Text>
+          <Text as="p" variant="secondary">Read-only v0.1.1 observer. Real EasyTier compatibility remains future validation work.</Text>
+        </div>
+        <Button type="button" variant="ghost" onClick={signOut}>Sign out</Button>
+      </div>
     </header>
 
     {error && <section className="error-banner text-kumo-danger" role="alert">{error}. Previous successful data is still shown when available.</section>}
@@ -95,6 +121,21 @@ export function App() {
       </form>
       {lookupError && <Text as="p" variant="error" role="alert">{lookupError}</Text>}
       <Text as="p" variant="secondary">Manual lookup is read-only. A valid but unobserved room can be inspected before it appears in the directory.</Text>
+      </LayerCard.Primary>
+    </LayerCard>
+
+    <LayerCard>
+      <LayerCard.Secondary>Private WebSocket token <Badge variant="outline">short lived</Badge></LayerCard.Secondary>
+      <LayerCard.Primary>
+        <div className="relay-token">
+          <Text as="p" variant="secondary">Issue a room-scoped WSS URI for EasyTier clients that can only use a query-string token.</Text>
+          <Button type="button" variant="outline" onClick={issueRelayToken} disabled={!selected}>Issue token for selected room</Button>
+          {tokenError && <Text as="p" variant="error" role="alert">{tokenError}</Text>}
+          {relayUri && <div className="token-output">
+            <Text as="p" variant="secondary">Room {relayUri.room}; expires {relayUri.expiresAt}. Treat this URI as a secret and do not commit it.</Text>
+            <code>{relayUri.uri}</code>
+          </div>}
+        </div>
       </LayerCard.Primary>
     </LayerCard>
 

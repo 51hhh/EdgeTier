@@ -5,7 +5,9 @@ const envPath = '.env.validation';
 const values = existsSync(envPath) ? parseEnv(readFileSync(envPath, 'utf8')) : {};
 const domain = clean(values.EDGETIER_EDGE_DOMAIN);
 const room = clean(values.EDGETIER_ROOM) || 'home-mesh';
-const wssUri = clean(values.EDGETIER_WSS_URI) || (domain ? `wss://${domain}/ws?room=${encodeURIComponent(room)}` : 'wss://<edge-domain>/ws?room=<room>');
+const token = clean(values.EDGETIER_WSS_TOKEN);
+const tokenValue = token ? encodeURIComponent(token) : '<short-lived-relay-token>';
+const wssUri = clean(values.EDGETIER_WSS_URI) || (domain ? `wss://${domain}/ws?room=${encodeURIComponent(room)}&token=${tokenValue}` : 'wss://<edge-domain>/ws?room=<room>&token=<short-lived-relay-token>');
 
 console.log('EdgeTier v0.1.2 validation helper');
 console.log('');
@@ -16,13 +18,16 @@ console.log('');
 
 if (!domain) {
   console.log('Fill EDGETIER_EDGE_DOMAIN in .env.validation after private deployment.');
-  console.log('Do not put network_secret or unredacted private logs in repo files.');
+  console.log('Optional local placeholders: EDGETIER_ROOM=home-mesh and EDGETIER_WSS_TOKEN=<short-lived-relay-token-from-dashboard>.');
+  console.log('Before deployment, configure Wrangler secrets: ADMIN_USERNAME, ADMIN_PASSWORD, SESSION_SECRET, RELAY_TOKEN_SECRET.');
+  console.log('Do not put network_secret, auth secrets, relay tokens, or unredacted private logs in repo files.');
   process.exit(0);
 }
 
 console.log('Private endpoint checks:');
-console.log(`curl -fsS https://${domain}/api/health`);
+console.log(`curl -fsS -b '<session-cookie>' https://${domain}/api/health`);
 console.log(`open https://${domain}/dashboard/`);
+console.log('Issue a short-lived relay token from the authenticated dashboard before testing /ws.');
 console.log('');
 console.log('Add this peer to private EasyTier config only:');
 console.log('[[peer]]');

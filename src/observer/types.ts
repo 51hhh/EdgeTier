@@ -54,3 +54,10 @@ export interface DirectoryRoomSummary {
   lastActivity?: string;
   active?: boolean;
 }
+
+export interface RelayTokenResponse {
+  room: string;
+  token: string;
+  expiresAt: string;
+  uriPath: string;
+}

@@ -26,6 +26,13 @@ body {
   gap: 6px;
 }
 
+.hero-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: start;
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
@@ -41,6 +48,18 @@ body {
   flex-wrap: wrap;
   gap: 12px;
   align-items: end;
+}
+
+.relay-token,
+.token-output {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.token-output code {
+  display: block;
+  overflow-wrap: anywhere;
 }
 
 .lookup > label,
