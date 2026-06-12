@@ -1,6 +1,6 @@
 import React, { FormEvent, useEffect, useMemo, useState } from 'react';
 import { Badge, Button, Empty, Input, LayerCard, Tabs, Text } from '@cloudflare/kumo';
-import { createRoomRelayToken, getRoom, getRoomEvents, getRoomTraffic, getRooms, logout } from './api';
+import { clearRoomSeed, createRoomRelayToken, getRoom, getRoomEvents, getRoomTraffic, getRooms, logout, seedRoom } from './api';
 import { ROOM_NAME_PATTERN } from '../easytier/constants';
 import type { DirectoryRoomSummary, RoomSnapshot } from '../observer/types';
 import { Overview } from './components/Overview';
@@ -86,6 +86,27 @@ export function App() {
     }
   };
 
+  const seedTest = async () => {
+    const target = selected ?? 'home-mesh';
+    try {
+      await seedRoom(target, 6);
+      if (!selected) selectRoom(target);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'failed to seed test data');
+    }
+  };
+
+  const clearTest = async () => {
+    if (!selected) return;
+    try {
+      await clearRoomSeed(selected);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'failed to clear test data');
+    }
+  };
+
   const signOut = async () => {
     await logout();
     window.location.href = '/login';
@@ -122,6 +143,11 @@ export function App() {
             <Input label="Inspect a known room" value={lookup} onChange={(e) => setLookup(e.target.value)} placeholder="home-mesh" variant={lookupError ? 'error' : 'default'} />
             <Button type="submit" variant="primary">Open room</Button>
           </form>
+          <div className="switch-row">
+            <Button type="button" variant="outline" onClick={seedTest}>Seed test data{selected ? ` into ${selected}` : ' (home-mesh)'}</Button>
+            <Button type="button" variant="ghost" onClick={clearTest} disabled={!selected}>Clear test data</Button>
+          </div>
+          <Text as="p" variant="secondary" size="sm">Test data injects synthetic peers/events/traffic so the dashboard can be verified without a live relay client. Clear it before real-node validation.</Text>
           {lookupError && <Text as="p" variant="error" role="alert">{lookupError}</Text>}
           {rooms.length === 0
             ? <Empty title="No rooms observed yet" description="Connect EasyTier WebSocket clients via the Config tab, or look up a known room above." />

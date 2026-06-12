@@ -12,6 +12,7 @@ export class RelayRoom implements DurableObject {
   private sessions = new Map<string, Session>();
   private peers = new Map<number, string>();
   private events: RelayEvent[] = [];
+  private seededPeers: PeerSnapshot[] = [];
   private traffic: TrafficSnapshot = { rxBytes: 0, txBytes: 0, rxPackets: 0, txPackets: 0, forwardedPackets: 0, unroutablePackets: 0, invalidPackets: 0 };
   private lastDirectorySync = 0;
   private directorySyncQueued = false;
@@ -22,6 +23,7 @@ export class RelayRoom implements DurableObject {
     const url = new URL(request.url);
     const roomId = url.searchParams.get('room') ?? 'default';
     if (url.pathname === '/connect') return this.acceptWebSocket(request, roomId);
+    if (url.pathname === '/test-seed') return this.seed(request, roomId);
     if (url.pathname === '/peers') return Response.json({ peers: this.snapshot(roomId).peers });
     if (url.pathname === '/events') return Response.json({ events: this.events });
     if (url.pathname === '/traffic') return Response.json(this.traffic);
@@ -116,10 +118,60 @@ export class RelayRoom implements DurableObject {
     if (this.events.length > RECENT_EVENTS_LIMIT) this.events.splice(0, this.events.length - RECENT_EVENTS_LIMIT);
   }
 
+  private async seed(request: Request, roomId: string): Promise<Response> {
+    const body = await request.json().catch(() => ({})) as { count?: number; clear?: boolean };
+    if (body.clear) {
+      this.seededPeers = [];
+      this.events = [];
+      this.traffic = { rxBytes: 0, txBytes: 0, rxPackets: 0, txPackets: 0, forwardedPackets: 0, unroutablePackets: 0, invalidPackets: 0 };
+      this.queueDirectorySync(roomId, true);
+      return Response.json({ ok: true, cleared: true });
+    }
+    const count = Math.min(Math.max(body.count ?? 3, 1), 16);
+    const now = Date.now();
+    this.seededPeers = [];
+    for (let index = 0; index < count; index += 1) {
+      const peerId = 1000 + index;
+      const connected = index % 4 !== 0;
+      const rxBytes = 4096 * (index + 1);
+      const txBytes = 2048 * (index + 1);
+      this.seededPeers.push({
+        sessionId: `seed-${peerId}`,
+        roomId,
+        peerId,
+        networkName: roomId,
+        networkSecretDigestPrefix: `seed${index}`,
+        connected,
+        connectedAt: new Date(now - (index + 1) * 60_000).toISOString(),
+        lastSeen: new Date(now - index * 1_000).toISOString(),
+        rxBytes,
+        txBytes,
+        rxPackets: index + 5,
+        txPackets: index + 2,
+      });
+      this.traffic.rxBytes += rxBytes;
+      this.traffic.txBytes += txBytes;
+      this.traffic.rxPackets += index + 5;
+      this.traffic.txPackets += index + 2;
+      this.traffic.forwardedPackets += index + 1;
+      if (index % 4 === 0) this.traffic.unroutablePackets += 1;
+      this.addEvent(roomId, 'connected', `seed peer ${peerId} connected`);
+      this.addEvent(roomId, 'handshake_seen', `seed peer ${peerId} handshake observed (synthetic)`);
+      if (index % 3 === 0) this.addEvent(roomId, 'packet_forwarded', `seed packet forwarded to peer ${peerId}`);
+      if (index % 4 === 0) this.addEvent(roomId, 'packet_unroutable', `seed packet to peer ${peerId} not routable`);
+      if (!connected) this.addEvent(roomId, 'disconnected', `seed peer ${peerId} disconnected`);
+    }
+    this.queueDirectorySync(roomId, true);
+    return Response.json({ ok: true, seeded: count });
+  }
+
   private snapshot(roomId: string): RoomSnapshot {
-    const peers = [...this.sessions.values()].map(({ ws: _ws, invalidPackets: _invalidPackets, ...peer }) => peer);
+    const livePeers = [...this.sessions.values()].map(({ ws: _ws, invalidPackets: _invalidPackets, ...peer }) => peer);
+    const peers = [...livePeers, ...this.seededPeers];
     const lastActivity = this.events.at(-1)?.timestamp;
-    return { roomId, peerCount: this.peers.size, websocketCount: this.sessions.size, bytes: this.traffic.rxBytes + this.traffic.txBytes, lastActivity, traffic: this.traffic, peers, recentEvents: this.events.slice(-50) };
+    const peerCount = this.peers.size + this.seededPeers.length;
+    const websocketCount = this.sessions.size + this.seededPeers.length;
+    return { roomId, peerCount, websocketCount, bytes: this.traffic.rxBytes + this.traffic.txBytes, lastActivity, traffic: this.traffic, peers, recentEvents: this.events.slice(-50) };
   }
 
   private queueDirectorySync(roomId: string, immediate = false): void {

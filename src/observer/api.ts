@@ -20,7 +20,7 @@ export async function handleApi(request: Request, env: Env, session: VerifiedSes
   if (url.pathname === '/api/health') return json({ ok: true, service: 'edgetier', version: '0.1.1', capabilities: ['wss-relay-skeleton', 'observer-api', 'dashboard', 'private-auth'] });
   if (url.pathname === '/api/auth/me') return json({ authenticated: true, user: { username: session.username }, expiresAt: session.expiresAt });
   if (url.pathname === '/api/rooms') return env.DIRECTORY.get(env.DIRECTORY.idFromName('global')).fetch('https://directory/');
-  const match = /^\/api\/rooms\/([^/]+)(?:\/(peers|events|traffic|token))?$/.exec(url.pathname);
+  const match = /^\/api\/rooms\/([^/]+)(?:\/(peers|events|traffic|token|test-seed))?$/.exec(url.pathname);
   if (!match) return null;
   const roomId = decodeURIComponent(match[1]);
   if (!validRoom(roomId)) return json({ error: 'invalid room name' }, 400);
@@ -28,6 +28,11 @@ export async function handleApi(request: Request, env: Env, session: VerifiedSes
     if (request.method !== 'POST') return json({ error: 'method not allowed' }, 405);
     const issued = await issueRelayToken(env, roomId, session.username);
     return json({ room: roomId, token: issued.token, expiresAt: issued.expiresAt, uriPath: `/ws?room=${encodeURIComponent(roomId)}&token=${encodeURIComponent(issued.token)}` });
+  }
+  if (match[2] === 'test-seed') {
+    if (request.method !== 'POST') return json({ error: 'method not allowed' }, 405);
+    const body = await request.text();
+    return roomStub(env, roomId).fetch(`https://room/test-seed?room=${encodeURIComponent(roomId)}`, { method: 'POST', body: body || '{}', headers: { 'Content-Type': 'application/json' } });
   }
   const subpath = match[2] ? `/${match[2]}` : '/';
   const response = await roomStub(env, roomId).fetch(`https://room${subpath}?room=${encodeURIComponent(roomId)}`);

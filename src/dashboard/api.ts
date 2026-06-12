@@ -22,6 +22,14 @@ export async function createRoomRelayToken(roomId: string): Promise<RelayTokenRe
   return fetchJson<RelayTokenResponse>(`/api/rooms/${encodeURIComponent(roomId)}/token`, { method: 'POST' });
 }
 
+export async function seedRoom(roomId: string, count: number): Promise<void> {
+  await fetchJson(`/api/rooms/${encodeURIComponent(roomId)}/test-seed`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ count }) });
+}
+
+export async function clearRoomSeed(roomId: string): Promise<void> {
+  await fetchJson(`/api/rooms/${encodeURIComponent(roomId)}/test-seed`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clear: true }) });
+}
+
 export async function logout(): Promise<void> {
   await fetchJson<{ ok: true }>('/api/auth/logout', { method: 'POST' });
 }
