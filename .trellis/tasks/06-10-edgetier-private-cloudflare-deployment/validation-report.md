@@ -182,3 +182,29 @@ Security / cleanup notes:
 - WSS token and network secret were only used from gitignored local files and temporary `/tmp` configs.
 - The remote test process was stopped after evidence capture; temporary local and remote `/tmp` configs/logs/tokens containing secret material were removed.
 - Cloudflare Workers still cannot run TUN/L3 data plane or dial UDP peers. Worker membership is achieved when a real EasyTier node initiates the WSS peer connection.
+
+## Current HEAD Redeploy Smoke Check
+
+Deployment version validated:
+
+- `32b69a73-6004-4598-9f30-003582158b5e`: redeployed from clean `master` at commit `d0b9d73`.
+
+Local/deploy gate:
+
+- `npm run build`: passed; Vite chunk-size warning only, Wrangler dry-run passed.
+- `npx wrangler deploy`: passed; no updated asset files, Worker deployed successfully.
+
+Online route checks:
+
+- `POST /api/auth/login`: `200`
+- `GET /api/health`: `200`
+- `GET /dashboard/`: `200`
+- `POST /api/rooms/home-mesh/token`: `200`
+
+Real `home-mesh` smoke window:
+
+- Test node: easytier-core 2.6.4 on `toe2`, temporary WSS token and config.
+- At `t+45s`, `/api/rooms/home-mesh` reported `peerCount=6`, `websocketCount=1`, and no duplicate peer ids.
+- `/api/rooms/home-mesh/topology` reported 6 nodes / 16 edges: 14 conn-bitmap edges and 2 PeerCenter latency edges, average latency about 151 ms.
+- Test node log showed Worker accepted as `dst_peer_id: 10000001` over WSS.
+- Temporary local and remote `/tmp` configs/logs/tokens were removed after evidence capture.
