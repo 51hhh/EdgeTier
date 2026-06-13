@@ -1,7 +1,7 @@
 import React from 'react';
 import { Badge, Empty, LayerCard, Table, Text } from '@cloudflare/kumo';
 import type { PeerSnapshot } from '../../observer/types';
-import { formatBytes } from '../format';
+import { formatByteRate, formatBytes, formatPercent } from '../format';
 import type { Translator } from '../i18n';
 
 interface PeerDetailProps {
@@ -63,8 +63,12 @@ export function PeerDetail({ peer, t }: PeerDetailProps) {
         <Row label={t('devices.proxyCidrs')} value={peer.proxyCidrs?.length ? peer.proxyCidrs.join(', ') : t('common.noneObserved')} muted={!peer.proxyCidrs?.length} />
         <Row label={t('devices.connectedAt')} value={peer.connectedAt} />
         <Row label={t('common.lastSeen')} value={peer.lastSeen} />
+        <Row label={t('common.latency')} value={peer.latencyMs === undefined ? t('common.notObserved') : `${peer.latencyMs} ms`} muted={peer.latencyMs === undefined} />
+        <Row label={t('common.lossRate')} value={peer.lossRate === undefined ? t('common.notObserved') : formatPercent(peer.lossRate)} muted={peer.lossRate === undefined} />
         <Row label={t('common.rx')} value={`${formatBytes(peer.rxBytes)} / ${peer.rxPackets} ${t('common.packets')}`} />
         <Row label={t('common.tx')} value={`${formatBytes(peer.txBytes)} / ${peer.txPackets} ${t('common.packets')}`} />
+        <Row label={`${t('common.rx')} ${t('common.rate')}`} value={formatByteRate(peer.rxBytesPerSecond ?? 0)} />
+        <Row label={`${t('common.tx')} ${t('common.rate')}`} value={formatByteRate(peer.txBytesPerSecond ?? 0)} />
       </div>
     </LayerCard.Primary>
   </LayerCard>;
@@ -90,9 +94,11 @@ export function PeerTable({ peers, selectedSession, onSelect, t }: PeerTableProp
       <Table.Head>{t('common.nat')}</Table.Head>
       <Table.Head>{t('common.version')}</Table.Head>
       <Table.Head>{t('common.status')}</Table.Head>
+      <Table.Head>{t('common.latency')}</Table.Head>
       <Table.Head>{t('common.lastSeen')}</Table.Head>
       <Table.Head>{t('common.rx')}</Table.Head>
       <Table.Head>{t('common.tx')}</Table.Head>
+      <Table.Head>{t('common.rate')}</Table.Head>
     </Table.Row></Table.Header>
     <Table.Body>
       {peers.map((peer) => (
@@ -108,9 +114,11 @@ export function PeerTable({ peers, selectedSession, onSelect, t }: PeerTableProp
           <Table.Cell>{peer.udpNatType ?? peer.tcpNatType ?? t('common.notDecoded')}</Table.Cell>
           <Table.Cell>{routeField(peer.easytierVersion, t)}</Table.Cell>
           <Table.Cell><Badge variant={statusVariant(peer)}>{statusLabel(peer, t)}</Badge></Table.Cell>
+          <Table.Cell>{peer.latencyMs === undefined ? t('common.notObserved') : `${peer.latencyMs} ms`}</Table.Cell>
           <Table.Cell>{peer.lastSeen}</Table.Cell>
           <Table.Cell>{formatBytes(peer.rxBytes)}</Table.Cell>
           <Table.Cell>{formatBytes(peer.txBytes)}</Table.Cell>
+          <Table.Cell>{formatByteRate(peer.rxBytesPerSecond ?? 0)} / {formatByteRate(peer.txBytesPerSecond ?? 0)}</Table.Cell>
         </Table.Row>
       ))}
     </Table.Body>

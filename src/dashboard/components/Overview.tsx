@@ -1,8 +1,9 @@
 import React from 'react';
 import { Badge, Empty, LayerCard, Table, Text } from '@cloudflare/kumo';
 import type { DirectoryRoomSummary, OutboundTcpStatus, RoomSnapshot } from '../../observer/types';
-import { eventBadgeVariant, formatBytes } from '../format';
+import { eventBadgeVariant, formatByteRate, formatBytes, formatPercent } from '../format';
 import type { Translator } from '../i18n';
+import { TrafficChart } from './TrafficChart';
 
 interface OverviewProps {
   rooms: DirectoryRoomSummary[];
@@ -40,6 +41,9 @@ export function Overview({ rooms, room, outboundTcp, t }: OverviewProps) {
       <Metric label={t('overview.activePeers')} value={totals.activePeers} />
       <Metric label={t('overview.websockets')} value={totals.websockets} />
       <Metric label={t('overview.relayBytes')} value={formatBytes(totals.bytes)} />
+      <Metric label={t('overview.rxRate')} value={formatByteRate(room?.traffic.summary.rxBytesPerSecond ?? 0)} />
+      <Metric label={t('overview.txRate')} value={formatByteRate(room?.traffic.summary.txBytesPerSecond ?? 0)} />
+      <Metric label={t('overview.relayDropRate')} value={formatPercent(room?.traffic.summary.relayDropRate)} />
     </section>
 
     <section className="grid">
@@ -67,6 +71,8 @@ export function Overview({ rooms, room, outboundTcp, t }: OverviewProps) {
         </LayerCard.Primary>
       </LayerCard>
     </section>
+
+    <TrafficChart traffic={room?.traffic} t={t} />
 
     <LayerCard>
       <LayerCard.Secondary>{t('overview.recentEvents')} {room ? <Badge variant="outline">{room.roomId}</Badge> : null}</LayerCard.Secondary>

@@ -2,8 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { EDGE_PEER_ID } from '../easytier/constants';
 import {
   applyOspfRouteSessionResponse,
+  buildConnectionMatrix,
   buildRouteConnBitmapForUpdate,
+  buildRoutePaths,
   buildRouteUpdatePeerIds,
+  buildTrafficSample,
+  buildTrafficSummary,
   buildTopologySummary,
   createOspfRouteSessionState,
   framePeerBindingCandidate,
@@ -242,27 +246,119 @@ describe('OSPF route session state', () => {
 
 describe('buildTopologySummary', () => {
   it('counts topology sources and latency fields', () => {
+    const nodes = [
+      { peerId: EDGE_PEER_ID, proxyCidrs: [], lastSeen: '2026-06-13T00:00:00.000Z' },
+      { peerId: 1, proxyCidrs: [], lastSeen: '2026-06-13T00:00:00.000Z' },
+      { peerId: 2, proxyCidrs: [], lastSeen: '2026-06-13T00:00:00.000Z' },
+    ];
+    const edges = [
+      { fromPeerId: EDGE_PEER_ID, toPeerId: 1, source: 'conn_bitmap' as const },
+      { fromPeerId: 1, toPeerId: 2, source: 'conn_bitmap' as const },
+      { fromPeerId: 1, toPeerId: 2, source: 'peer_center' as const, latencyMs: 20 },
+      { fromPeerId: 2, toPeerId: 1, source: 'peer_center' as const, latencyMs: 30 },
+    ];
+    const matrix = buildConnectionMatrix(edges, nodes.map((node) => node.peerId));
+    const routes = buildRoutePaths(nodes, edges, new Set([1]));
+
     const summary = buildTopologySummary(
-      [
-        { peerId: 1, proxyCidrs: [], lastSeen: '2026-06-13T00:00:00.000Z' },
-        { peerId: 2, proxyCidrs: [], lastSeen: '2026-06-13T00:00:00.000Z' },
-      ],
-      [
-        { fromPeerId: 1, toPeerId: 2, source: 'conn_bitmap' },
-        { fromPeerId: 1, toPeerId: 2, source: 'peer_center', latencyMs: 20 },
-        { fromPeerId: 2, toPeerId: 1, source: 'peer_center', latencyMs: 30 },
-      ],
+      nodes,
+      edges,
+      routes,
+      matrix,
+      0.25,
     );
 
     expect(summary).toEqual({
-      nodeCount: 2,
-      edgeCount: 3,
-      connBitmapEdgeCount: 1,
+      nodeCount: 3,
+      edgeCount: 4,
+      connBitmapEdgeCount: 2,
       peerCenterEdgeCount: 2,
       latencyEdgeCount: 2,
       averageLatencyMs: 25,
-      peerCenterRatio: 2 / 3,
+      peerCenterRatio: 2 / 4,
+      routeCount: 2,
+      reachableRouteCount: 2,
+      connectionMatrixNodeCount: 3,
+      relayDropRate: 0.25,
     });
+  });
+});
+
+describe('traffic samples', () => {
+  it('derives rates and relay drop ratio from cumulative counters', () => {
+    const first = buildTrafficSample(undefined, {
+      rxBytes: 100,
+      txBytes: 40,
+      rxPackets: 10,
+      txPackets: 4,
+      forwardedPackets: 3,
+      unroutablePackets: 1,
+      invalidPackets: 0,
+    }, Date.parse('2026-06-13T00:00:00.000Z'));
+    const second = buildTrafficSample(first, {
+      rxBytes: 600,
+      txBytes: 240,
+      rxPackets: 20,
+      txPackets: 8,
+      forwardedPackets: 6,
+      unroutablePackets: 2,
+      invalidPackets: 1,
+    }, Date.parse('2026-06-13T00:00:05.000Z'));
+
+    expect(first.rxBytesPerSecond).toBe(0);
+    expect(first.relayDropRate).toBe(0.1);
+    expect(second.rxBytesPerSecond).toBe(100);
+    expect(second.txBytesPerSecond).toBe(40);
+    expect(second.rxPacketsPerSecond).toBe(2);
+    expect(second.relayDropRate).toBe(0.2);
+    expect(buildTrafficSummary({
+      rxBytes: 600,
+      txBytes: 240,
+      rxPackets: 20,
+      txPackets: 8,
+      forwardedPackets: 6,
+      unroutablePackets: 2,
+      invalidPackets: 1,
+    }, second)).toMatchObject({
+      rxBytesPerSecond: 100,
+      txBytesPerSecond: 40,
+      totalRelayDropPackets: 3,
+      relayDropRate: 0.15,
+      sampledAt: '2026-06-13T00:00:05.000Z',
+    });
+  });
+});
+
+describe('connection matrix and route paths', () => {
+  it('builds conn-bitmap rows and shortest Worker-rooted paths', () => {
+    const nodes = [
+      { peerId: EDGE_PEER_ID, proxyCidrs: [], lastSeen: '2026-06-13T00:00:00.000Z' },
+      { peerId: 10, proxyCidrs: [], lastSeen: '2026-06-13T00:00:00.000Z' },
+      { peerId: 20, proxyCidrs: [], lastSeen: '2026-06-13T00:00:00.000Z' },
+      { peerId: 30, proxyCidrs: [], lastSeen: '2026-06-13T00:00:00.000Z' },
+    ];
+    const edges = [
+      { fromPeerId: EDGE_PEER_ID, toPeerId: 10, source: 'conn_bitmap' as const },
+      { fromPeerId: 10, toPeerId: 20, source: 'conn_bitmap' as const },
+      { fromPeerId: 10, toPeerId: EDGE_PEER_ID, source: 'peer_center' as const, latencyMs: 12 },
+      { fromPeerId: 10, toPeerId: 20, source: 'peer_center' as const, latencyMs: 34 },
+    ];
+
+    expect(buildConnectionMatrix(edges, nodes.map((node) => node.peerId))).toEqual({
+      peerIds: [10, 20, 30, EDGE_PEER_ID].sort((a, b) => a - b),
+      rows: [
+        { peerId: 10, connectedPeerIds: [20] },
+        { peerId: 20, connectedPeerIds: [] },
+        { peerId: 30, connectedPeerIds: [] },
+        { peerId: EDGE_PEER_ID, connectedPeerIds: [10] },
+      ].sort((a, b) => a.peerId - b.peerId),
+    });
+
+    expect(buildRoutePaths(nodes, edges, new Set([10]))).toEqual([
+      { peerId: 10, nextHopPeerId: 10, hopCount: 1, pathPeerIds: [EDGE_PEER_ID, 10], source: 'live_peer', latencyMs: 12, cost: undefined, lossRate: undefined },
+      { peerId: 20, nextHopPeerId: 10, hopCount: 2, pathPeerIds: [EDGE_PEER_ID, 10, 20], source: 'conn_bitmap', latencyMs: 46, cost: undefined, lossRate: undefined },
+      { peerId: 30, pathPeerIds: [], source: 'unreachable', cost: undefined, lossRate: undefined },
+    ]);
   });
 });
 

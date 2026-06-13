@@ -136,6 +136,129 @@ body {
   padding: 6px 0;
 }
 
+.traffic-chart,
+.topology-graph {
+  width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--color-kumo-hairline);
+  border-radius: 8px;
+  background: var(--color-kumo-base);
+}
+
+.traffic-chart svg {
+  display: block;
+  width: 100%;
+  height: 220px;
+}
+
+.topology-graph svg {
+  display: block;
+  width: 100%;
+  min-height: 320px;
+}
+
+.chart-grid-line {
+  stroke: var(--color-kumo-hairline);
+  stroke-width: 1;
+}
+
+.traffic-line {
+  fill: none;
+  stroke-width: 3;
+  vector-effect: non-scaling-stroke;
+}
+
+.traffic-line.rx {
+  stroke: var(--color-kumo-brand, #2563eb);
+}
+
+.traffic-line.tx {
+  stroke: var(--color-kumo-success, #11845b);
+}
+
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  padding-top: 8px;
+  color: var(--color-kumo-subtle);
+  font-size: 0.875rem;
+}
+
+.legend-swatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  margin-right: 6px;
+  vertical-align: -1px;
+  background: var(--color-kumo-hairline);
+}
+
+.legend-swatch.rx,
+.legend-swatch.bitmap {
+  background: var(--color-kumo-brand, #2563eb);
+}
+
+.legend-swatch.tx,
+.legend-swatch.peer-center {
+  background: var(--color-kumo-success, #11845b);
+}
+
+.graph-edge {
+  stroke-width: 2;
+  opacity: 0.75;
+  vector-effect: non-scaling-stroke;
+}
+
+.graph-edge.conn-bitmap {
+  stroke: var(--color-kumo-brand, #2563eb);
+}
+
+.graph-edge.peer-center {
+  stroke: var(--color-kumo-success, #11845b);
+  stroke-dasharray: 6 6;
+}
+
+.graph-edge-label,
+.graph-node-label {
+  fill: var(--color-kumo-default);
+  font-size: 12px;
+  text-anchor: middle;
+  paint-order: stroke;
+  stroke: var(--color-kumo-base);
+  stroke-width: 4px;
+  stroke-linejoin: round;
+}
+
+.graph-node {
+  fill: var(--color-kumo-recessed);
+  stroke: var(--color-kumo-brand, #2563eb);
+  stroke-width: 2;
+}
+
+.graph-node.edge {
+  fill: var(--color-kumo-brand, #2563eb);
+}
+
+.matrix-scroll {
+  overflow-x: auto;
+}
+
+.matrix-scroll table {
+  min-width: 640px;
+}
+
+.matrix-on {
+  color: var(--color-kumo-success, #11845b);
+  font-weight: 700;
+}
+
+.matrix-off {
+  color: var(--color-kumo-subtle);
+}
+
 .logs-controls {
   display: flex;
   align-items: center;

@@ -58,8 +58,12 @@ markRoomActivity(rooms: DirectoryRoomSummary[], now?: number): DirectoryRoomSumm
 - Caller-supplied `active` must not be trusted or stored as truth.
 - `RoomSnapshot.recentEvents` is the recent ring-buffer view, not an audit log.
 - `TrafficSnapshot` counters are numbers and monotonically increase for the current room object lifetime.
+- `TrafficSnapshot.samples` is a bounded room-local time series of Worker-observed relay frame rates. Dashboard charts must read `rxBytesPerSecond`/`txBytesPerSecond` from samples and must not infer direct EasyTier P2P data-plane traffic between other nodes.
+- `TrafficSnapshot.summary.relayDropRate` is a Worker relay drop ratio from invalid/unroutable frames. It is not official EasyTier per-connection `loss_rate`; render official loss rate as `not observed` unless a typed payload field explicitly provides it.
 - `TopologySnapshot.summary` is the API-owned aggregate for topology metrics. Dashboard components may render fallback values for older responses, but new API code must populate it.
 - `TopologySummary.peerCenterRatio` is a number from 0 to 1 when edges exist; render it as a percentage in the dashboard.
+- `TopologySnapshot.routes` is a Worker-rooted derived path list from conn bitmap/live peer sessions. Render `source: "unreachable"` as unavailable instead of inventing a next hop.
+- `TopologySnapshot.connectionMatrix` is the decoded conn-bitmap adjacency matrix; render matrix cells from `connectedPeerIds` rather than recalculating from graph SVG state.
 
 ### 4. Validation & Error Matrix
 
@@ -69,6 +73,7 @@ markRoomActivity(rooms: DirectoryRoomSummary[], now?: number): DirectoryRoomSumm
 | New API field added | Add to `src/observer/types.ts` first |
 | API response shape changed | Update dashboard helper return type and usage together |
 | Topology DTO changed | Update `TopologySnapshot`, `TopologySummary`, `/api/rooms/:roomId/topology`, and `Topology` component usage together |
+| Traffic DTO changed | Update `TrafficSnapshot`, `/api/rooms/:roomId/traffic`, `RoomSnapshot.traffic`, and overview chart/rate usage together |
 | Directory POST body unknown | Runtime-validate with `validateDirectoryRoomSummary` |
 | Directory POST body has caller-supplied `active` | Drop `active`; recompute on GET |
 | Protocol header parse fails | Return `null`, not a partially typed object |
@@ -76,17 +81,21 @@ markRoomActivity(rooms: DirectoryRoomSummary[], now?: number): DirectoryRoomSumm
 ### 5. Good/Base/Bad Cases
 
 - Good: `import type { RoomSnapshot } from '../observer/types';`
+- Good: `formatPercent(room.traffic.summary.relayDropRate)` with text that identifies it as Worker relay drop rate.
+- Good: `route.lossRate === undefined ? t('common.notObserved') : formatPercent(route.lossRate)` for official EasyTier loss fields.
 - Good: `parseEasyTierHeader(frame): EasyTierPacketHeader | null` for invalid input.
 - Good: `validateDirectoryRoomSummary(value): DirectoryRoomSummary | null` at the storage boundary.
 - Base: `peerId?: number` remains optional.
 - Base: `active?: boolean` is present in API output but not trusted on input.
 - Bad: dashboard defines its own `Room` type with different field names.
+- Bad: dashboard labels Worker `relayDropRate` as EasyTier packet loss.
 - Bad: using `as any` to silence API contract mismatches.
 - Bad: storing an unvalidated `request.json()` object into DO storage.
 
 ### 6. Tests Required
 
 - `npm run typecheck` after any DTO/API/dashboard change.
+- Unit test pure topology/traffic aggregators when adding fields to `TopologySummary`, `RoutePathSnapshot`, `ConnectionMatrixSnapshot`, `TrafficSample`, or `TrafficSummary`.
 - Parser tests for typed protocol helpers.
 - Directory validation tests for valid/invalid summaries and active flag sanitization.
 - Future API contract tests for `/api/rooms/:roomId` response shape.

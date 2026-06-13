@@ -150,6 +150,7 @@ interface PersistedControlState {
   topologyUpdatedAt?: string;
   routePeers: RoutePeerSnapshot[];
   rawRoutePeerInfos: RoutePeerInfo[];
+  connBitmapPeerIds: number[];
   connBitmapEdges: TopologyEdge[];
   peerCenter: Array<{
     peerId: number;
@@ -180,7 +181,7 @@ interface PersistedControlState {
 
 ### 5. Good/Base/Bad Cases
 
-- Good: persist `routePeers`, `rawRoutePeerInfos`, `connBitmapEdges`, and PeerCenter latency maps under `control-state:v1`.
+- Good: persist `routePeers`, `rawRoutePeerInfos`, `connBitmapPeerIds`, `connBitmapEdges`, and PeerCenter latency maps under `control-state:v1`.
 - Good: rehydrate route/PeerCenter observer state after Durable Object eviction, then prune stale entries before serving snapshots.
 - Base: after a cold start with no persisted state, `/api/rooms/:id/topology` returns empty nodes/edges plus a zero summary.
 - Bad: storing `DerivedKeys`, `networkSecret`, WebSocket handles, raw packet payloads, or full digests in Durable Object storage.
@@ -209,6 +210,7 @@ await state.storage.put('control-state:v1', {
   routeVersion,
   routePeers: [...routePeers.values()],
   rawRoutePeerInfos: [...rawRoutePeerInfos.values()],
+  connBitmapPeerIds,
   connBitmapEdges,
   peerCenter: serializePeerCenter(peerCenter),
 });

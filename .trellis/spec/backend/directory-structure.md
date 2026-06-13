@@ -142,6 +142,36 @@ interface EasyTierPacketHeader {
 
 Observer payloads are defined in `src/observer/types.ts` and must remain the shared contract between Worker APIs and dashboard code.
 
+Traffic and topology observer payloads are API-owned derived views, not raw EasyTier proto dumps:
+
+```typescript
+interface TrafficSnapshot {
+  rxBytes: number;
+  txBytes: number;
+  rxPackets: number;
+  txPackets: number;
+  forwardedPackets: number;
+  unroutablePackets: number;
+  invalidPackets: number;
+  samples: TrafficSample[];   // bounded room-local rate samples
+  summary: TrafficSummary;    // latest rates + Worker relay drop ratio
+}
+
+interface TopologySnapshot {
+  roomId: string;
+  nodes: RoutePeerSnapshot[];
+  edges: TopologyEdge[];              // conn_bitmap and PeerCenter edges only
+  routes: RoutePathSnapshot[];        // Worker-rooted paths derived from conn_bitmap/live peers
+  connectionMatrix: ConnectionMatrixSnapshot; // decoded conn bitmap rows
+  summary: TopologySummary;
+  updatedAt?: string;
+}
+```
+
+`TrafficSummary.relayDropRate` is `(unroutablePackets + invalidPackets) / rxPackets` for Worker-observed relay frames. It is not EasyTier's official per-connection `loss_rate`; official loss rate exists in EasyTier management API `api_instance.PeerConnInfo.loss_rate` and must remain optional/`not observed` unless a decoded source provides it.
+
+`TopologySnapshot.routes` is a best-effort Worker-rooted route view derived from decoded conn bitmap plus live EdgeTier peer sessions. It must not synthesize a full mesh or claim EasyTier's native `ListRouteResponse.path_latency` unless that management API data is actually decoded.
+
 Default room selection is read-only and secret-free:
 
 ```typescript

@@ -12,6 +12,10 @@ Phase C/D 的 Worker-feasible 部分已接入 route push/broadcast、PeerCenter 
 topology summary DTO 与面板。出站 TCP `connect()` 已实现 Worker 侧主动拨号:官方 TCP tunnel 帧确认为
 `u32le length + EasyTier peer-manager frame`,`RelayRoom` 可主动拨 `tcp://` 公共节点并复用现有握手/解密/RPC 观测路径。
 部署版 `6a15c4e3-3582-472d-9019-73b8147ed2ed` 已完成 `home-mesh` outbound TCP live evidence。
+面板指标层已继续补齐 Worker-feasible 最大面:`TrafficSnapshot.samples/summary` 提供 Worker 可观测
+RX/TX 速率折线图,Topology 提供 conn bitmap matrix、SVG 连接图、Worker-rooted route paths、PeerCenter
+latency。官方 EasyTier `loss_rate` 位于管理 API `api_instance.PeerConnInfo.loss_rate`;当前 peer RPC
+控制面未提供该字段时只能显示未观测,不能用 Worker relay drop rate 冒充。
 剩余工作是压缩 route 表真机向量、断线 cleanup/长测、DO 重启/休眠证据、per-room secret 部署验证。
 
 ## 1. 结论:可行,且有现成先例

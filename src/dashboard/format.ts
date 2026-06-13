@@ -12,6 +12,16 @@ export function formatBytes(bytes: number): string {
   return unit === 0 ? `${Math.round(value)} B` : `${value.toFixed(1)} ${units[unit]}`;
 }
 
+export function formatByteRate(bytesPerSecond: number): string {
+  return `${formatBytes(bytesPerSecond)}/s`;
+}
+
+export function formatPercent(value: number | undefined): string {
+  if (value === undefined || !Number.isFinite(value)) return '-';
+  const normalized = Math.max(0, Math.min(1, value));
+  return `${(normalized * 100).toFixed(normalized < 0.01 && normalized > 0 ? 2 : 1)}%`;
+}
+
 export function eventBadgeVariant(type: RelayEventType): 'primary' | 'secondary' | 'destructive' | 'outline' {
   if (type === 'decode_error' || type === 'limit_exceeded') return 'destructive';
   if (type === 'packet_unroutable') return 'outline';

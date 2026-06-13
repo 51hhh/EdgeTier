@@ -165,11 +165,14 @@ RpcReq=8 / RpcResp=9 的 body(加密)解密后是 `common.RpcPacket` → 内含 
 
 验收:真节点把 EdgeTier 当 peer **长期在线**(不再 6 秒断);两节点经 EdgeTier 形成组网;断线秒级反映到面板。本轮已验证长于 45 秒的真实 WSS 控制面与 PeerCenter/route 响应;断线 cleanup 与长测仍需补证据。
 
-### Phase D — 拓扑与延迟可视化（✅ DTO/API/页面已实现;待真实数据验证）
-1. conn bitmap → 拓扑边;global peer map → latency edges + PeerCenter ratio summary。
-2. 路由更新事件流;面板 Topology 页展示节点、边、latency、summary。
+### Phase D — 拓扑、路由、延迟与流量可视化（✅ DTO/API/页面已实现;待真实数据验证）
+1. conn bitmap → 拓扑边 + connection matrix;global peer map → latency edges + PeerCenter ratio summary。
+2. conn bitmap/live peer → 以 Worker 为根推导 route paths(下一跳/跳数/路径/可达性),不合成全 mesh。
+3. Worker 会话计数 → `TrafficSnapshot.samples/summary`,Overview 显示 RX/TX 速率折线图和 relay drop rate。
+4. 路由更新事件流;面板 Topology 页展示节点、边、latency、summary、连接图、route table、bitmap matrix。
+5. 官方 EasyTier `loss_rate` 属管理 API `api_instance.PeerConnInfo.loss_rate`;当前 peer RPC 控制面未提供时 UI 显示未观测,不得把 Worker relay drop rate 标成官方丢包率。
 
-验收:面板展示组网拓扑与节点间延迟,P2P/relay 状态如实标注。本轮已验证 topology summary 输出真实 conn bitmap + PeerCenter latency edges。
+验收:面板展示组网拓扑、Worker-rooted 路由路径、bitmap matrix、节点间延迟与 Worker 可观测流量;P2P/relay/不可见数据如实标注。本轮已验证 topology summary 输出真实 conn bitmap + PeerCenter latency edges。
 
 ---
 

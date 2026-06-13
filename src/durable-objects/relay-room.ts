@@ -29,7 +29,20 @@ import {
   type SyncRouteInfoResponse,
 } from '../easytier/rpc';
 import { encodeTcpTunnelFrame, parseTcpPeerUri, TcpTunnelFrameDecoder, type TcpPeerAddress } from '../easytier/tcp-frame';
-import type { PeerSnapshot, RelayEvent, RoomSnapshot, RoutePeerSnapshot, TopologyEdge, TopologySnapshot, TopologySummary, TrafficSnapshot } from '../observer/types';
+import type {
+  ConnectionMatrixSnapshot,
+  PeerSnapshot,
+  RelayEvent,
+  RoomSnapshot,
+  RoutePathSnapshot,
+  RoutePeerSnapshot,
+  TopologyEdge,
+  TopologySnapshot,
+  TopologySummary,
+  TrafficSample,
+  TrafficSnapshot,
+  TrafficSummary,
+} from '../observer/types';
 import type { Env } from '../worker/env';
 
 type SessionTransportKind = 'websocket' | 'tcp-outbound';
@@ -75,6 +88,7 @@ interface PersistedControlState {
   topologyUpdatedAt?: string;
   routePeers: RoutePeerSnapshot[];
   rawRoutePeerInfos: RoutePeerInfo[];
+  connBitmapPeerIds?: number[];
   connBitmapEdges: TopologyEdge[];
   peerCenter: PersistedPeerCenterEntry[];
 }
@@ -97,6 +111,8 @@ export interface OspfRouteSessionState {
   lastSyncSuccessAt?: number;
 }
 
+type TrafficCounters = Omit<TrafficSnapshot, 'samples' | 'summary'>;
+
 const DIRECTORY_SYNC_MIN_MS = 5_000;
 const CONTROL_STATE_PERSIST_MIN_MS = 2_000;
 const ROUTE_PUSH_MIN_MS = 10_000;
@@ -104,6 +120,8 @@ const ROUTE_STATE_TTL_MS = 180_000;
 const HEARTBEAT_INTERVAL_MS = 10_000;
 const CONNECTION_TIMEOUT_MS = 25_000;
 const MAINTENANCE_ALARM_MS = 5_000;
+const TRAFFIC_SAMPLE_INTERVAL_MS = 5_000;
+const TRAFFIC_SAMPLES_LIMIT = 120;
 const CONTROL_STATE_STORAGE_KEY = 'control-state:v1';
 const WS_OPEN = 1;
 
@@ -119,7 +137,10 @@ export class RelayRoom implements DurableObject {
   private peerCenterEdges: TopologyEdge[] = [];
   private topologyUpdatedAt: string | undefined;
   private routeVersion = Math.floor(Date.now() / 1000) % 2_000_000_000;
-  private traffic: TrafficSnapshot = { rxBytes: 0, txBytes: 0, rxPackets: 0, txPackets: 0, forwardedPackets: 0, unroutablePackets: 0, invalidPackets: 0 };
+  private connBitmapPeerIds: number[] = [];
+  private traffic: TrafficCounters = emptyTrafficCounters();
+  private trafficSamples: TrafficSample[] = [];
+  private sessionRateBaselines = new Map<string, { at: number; rxBytes: number; txBytes: number; rxPackets: number; txPackets: number }>();
   private lastDirectorySync = 0;
   private directorySyncQueued = false;
   private lastControlStatePersist = 0;
@@ -144,7 +165,7 @@ export class RelayRoom implements DurableObject {
     if (url.pathname === '/test-seed') return this.seed(request, roomId);
     if (url.pathname === '/peers') return Response.json({ peers: this.snapshot(roomId).peers });
     if (url.pathname === '/events') return Response.json({ events: this.events });
-    if (url.pathname === '/traffic') return Response.json(this.traffic);
+    if (url.pathname === '/traffic') return Response.json(this.snapshotTraffic());
     if (url.pathname === '/topology') return Response.json(this.snapshotTopology(roomId));
     return Response.json(this.snapshot(roomId));
   }
@@ -559,8 +580,11 @@ export class RelayRoom implements DurableObject {
     }
     if (req.connBitmap || req.connPeerList) {
       const nextEdges = req.connPeerList ? edgesFromConnPeerList(req.connPeerList) : edgesFromConnBitmap(req.connBitmap!);
+      const nextPeerIds = req.connPeerList ? peerIdsFromConnPeerList(req.connPeerList) : peerIdsFromConnBitmap(req.connBitmap!);
       if (topologyEdgeSignature(nextEdges) !== topologyEdgeSignature(this.connBitmapEdges)) changed = true;
+      if (peerIdSignature(nextPeerIds) !== peerIdSignature(this.connBitmapPeerIds)) changed = true;
       this.connBitmapEdges = nextEdges;
+      this.connBitmapPeerIds = nextPeerIds;
     }
     if (changed) this.routeVersion += 1;
     this.topologyUpdatedAt = now;
@@ -905,12 +929,15 @@ export class RelayRoom implements DurableObject {
       this.seededPeers = [];
       this.routePeers = new Map();
       this.rawRoutePeerInfos = new Map();
+      this.connBitmapPeerIds = [];
       this.connBitmapEdges = [];
       this.peerCenter = new Map();
       this.peerCenterEdges = [];
       this.topologyUpdatedAt = undefined;
       this.events = [];
-      this.traffic = { rxBytes: 0, txBytes: 0, rxPackets: 0, txPackets: 0, forwardedPackets: 0, unroutablePackets: 0, invalidPackets: 0 };
+      this.traffic = emptyTrafficCounters();
+      this.trafficSamples = [];
+      this.sessionRateBaselines = new Map();
       this.queueControlStatePersist(true);
       this.queueDirectorySync(roomId, true);
       return Response.json({ ok: true, cleared: true });
@@ -955,6 +982,8 @@ export class RelayRoom implements DurableObject {
 
   private snapshot(roomId: string): RoomSnapshot {
     if (this.pruneStaleRouteState()) this.queueControlStatePersist();
+    const traffic = this.snapshotTraffic();
+    const peerLatencies = peerLatenciesByPeer(this.peerCenterEdges);
     const livePeers = [...this.sessions.values()].map(({
       sendRawFrame: _sendRawFrame,
       closeTransport: _closeTransport,
@@ -973,7 +1002,7 @@ export class RelayRoom implements DurableObject {
       outboundPeerUri: _outboundPeerUri,
       outboundHandshakeSent: _outboundHandshakeSent,
       ...peer
-    }) => peer);
+    }) => ({ ...peer, latencyMs: peer.peerId ? peerLatencies.get(peer.peerId) ?? peer.latencyMs : peer.latencyMs }));
     const livePeerIds = new Set(livePeers.map((peer) => peer.peerId).filter((peerId): peerId is number => peerId !== undefined));
     const peerCenterLastSeen = this.peerCenterLastSeen();
     const routeOnlyPeers: PeerSnapshot[] = [...this.routePeers.values()]
@@ -994,6 +1023,8 @@ export class RelayRoom implements DurableObject {
         peerRouteId: peer.peerRouteId,
         networkLength: peer.networkLength,
         cost: peer.cost,
+        latencyMs: peerLatencies.get(peer.peerId) ?? peer.latencyMs,
+        lossRate: peer.lossRate,
         connected: false,
         connectedAt: peer.lastSeen,
         lastSeen: peer.lastSeen,
@@ -1011,6 +1042,7 @@ export class RelayRoom implements DurableObject {
         peerId,
         networkName: this.expectedNetworkName(roomId),
         proxyCidrs: [],
+        latencyMs: peerLatencies.get(peerId),
         connected: false,
         connectedAt: lastSeen,
         lastSeen,
@@ -1031,6 +1063,7 @@ export class RelayRoom implements DurableObject {
       easytierVersion: 'edgetier-worker',
       routeVersion: this.routeVersion,
       networkLength: firstNetworkLength(this.rawRoutePeerInfos) ?? 24,
+      latencyMs: 0,
       connected: this.sessions.size > 0,
       connectedAt: this.events[0]?.timestamp ?? lastActivity ?? new Date().toISOString(),
       lastSeen: lastActivity ?? new Date().toISOString(),
@@ -1047,7 +1080,7 @@ export class RelayRoom implements DurableObject {
     for (const peerId of peerCenterLastSeen.keys()) peerIds.add(peerId);
     const peerCount = peerIds.size + this.seededPeers.length;
     const websocketCount = [...this.sessions.values()].filter((session) => session.transportKind === 'websocket').length + this.seededPeers.length;
-    return { roomId, peerCount, websocketCount, bytes: this.traffic.rxBytes + this.traffic.txBytes, lastActivity, traffic: this.traffic, peers, recentEvents: this.events.slice(-50), topology: this.snapshotTopology(roomId) };
+    return { roomId, peerCount, websocketCount, bytes: this.traffic.rxBytes + this.traffic.txBytes, lastActivity, traffic, peers, recentEvents: this.events.slice(-50), topology: this.snapshotTopology(roomId) };
   }
 
   private snapshotTopology(roomId: string): TopologySnapshot {
@@ -1072,16 +1105,79 @@ export class RelayRoom implements DurableObject {
       }
     }
 
-    const sortedNodes = [...nodes.values()].sort((a, b) => a.peerId - b.peerId);
     const edges = mergeTopologyEdges(this.connBitmapEdges, this.peerCenterEdges);
+    const peerLatencies = peerLatenciesByPeer(this.peerCenterEdges);
+    const sortedNodes = [...nodes.values()]
+      .map((node) => ({ ...node, latencyMs: node.peerId === EDGE_PEER_ID ? 0 : peerLatencies.get(node.peerId) ?? node.latencyMs }))
+      .sort((a, b) => a.peerId - b.peerId);
+    const connectionMatrix = buildConnectionMatrix(this.connBitmapEdges, this.connBitmapPeerIds);
+    const routes = buildRoutePaths(sortedNodes, edges, new Set(this.peers.keys()), EDGE_PEER_ID);
 
     return {
       roomId,
       nodes: sortedNodes,
       edges,
-      summary: buildTopologySummary(sortedNodes, edges),
+      routes,
+      connectionMatrix,
+      summary: buildTopologySummary(sortedNodes, edges, routes, connectionMatrix, relayDropRate(this.traffic)),
       ...(this.topologyUpdatedAt ? { updatedAt: this.topologyUpdatedAt } : {}),
     };
+  }
+
+  private snapshotTraffic(): TrafficSnapshot {
+    this.recordTrafficSample();
+    const latest = this.trafficSamples.at(-1);
+    return {
+      ...this.traffic,
+      samples: [...this.trafficSamples],
+      summary: buildTrafficSummary(this.traffic, latest),
+    };
+  }
+
+  private recordTrafficSample(now = Date.now()): void {
+    const previous = this.trafficSamples.at(-1);
+    if (previous) {
+      const previousAt = Date.parse(previous.timestamp);
+      if (Number.isFinite(previousAt) && now - previousAt < TRAFFIC_SAMPLE_INTERVAL_MS) {
+        this.updateSessionRates(now, false);
+        return;
+      }
+    }
+    this.trafficSamples.push(buildTrafficSample(previous, this.traffic, now));
+    if (this.trafficSamples.length > TRAFFIC_SAMPLES_LIMIT) this.trafficSamples.splice(0, this.trafficSamples.length - TRAFFIC_SAMPLES_LIMIT);
+    this.updateSessionRates(now, true);
+  }
+
+  private updateSessionRates(now: number, force: boolean): void {
+    const activeSessionIds = new Set<string>();
+    for (const session of this.sessions.values()) {
+      activeSessionIds.add(session.sessionId);
+      const previous = this.sessionRateBaselines.get(session.sessionId);
+      const elapsedSeconds = previous ? Math.max(0, (now - previous.at) / 1000) : 0;
+      if (force && previous && elapsedSeconds > 0) {
+        session.rxBytesPerSecond = rate(session.rxBytes - previous.rxBytes, elapsedSeconds);
+        session.txBytesPerSecond = rate(session.txBytes - previous.txBytes, elapsedSeconds);
+        session.rxPacketsPerSecond = rate(session.rxPackets - previous.rxPackets, elapsedSeconds);
+        session.txPacketsPerSecond = rate(session.txPackets - previous.txPackets, elapsedSeconds);
+      } else {
+        session.rxBytesPerSecond ??= 0;
+        session.txBytesPerSecond ??= 0;
+        session.rxPacketsPerSecond ??= 0;
+        session.txPacketsPerSecond ??= 0;
+      }
+      if (force || !previous) {
+        this.sessionRateBaselines.set(session.sessionId, {
+          at: now,
+          rxBytes: session.rxBytes,
+          txBytes: session.txBytes,
+          rxPackets: session.rxPackets,
+          txPackets: session.txPackets,
+        });
+      }
+    }
+    for (const sessionId of this.sessionRateBaselines.keys()) {
+      if (!activeSessionIds.has(sessionId)) this.sessionRateBaselines.delete(sessionId);
+    }
   }
 
   private hasObservedNetworkState(): boolean {
@@ -1176,6 +1272,7 @@ export class RelayRoom implements DurableObject {
     for (const info of this.peerCenter.values()) {
       for (const peerId of info.directPeers.keys()) known.add(peerId);
     }
+    this.connBitmapPeerIds = this.connBitmapPeerIds.filter((peerId) => known.has(peerId));
     this.connBitmapEdges = this.connBitmapEdges.filter((edge) => known.has(edge.fromPeerId) && known.has(edge.toPeerId));
     this.peerCenterEdges = this.peerCenterEdges.filter((edge) => known.has(edge.fromPeerId) && known.has(edge.toPeerId));
   }
@@ -1225,6 +1322,7 @@ export class RelayRoom implements DurableObject {
       .filter((info) => Number.isInteger(info.peerId) && info.peerId > 0)
       .map((info) => [info.peerId, cloneRoutePeerInfo({ ...info, proxyCidrs: Array.isArray(info.proxyCidrs) ? info.proxyCidrs : [] })]));
     this.connBitmapEdges = sanitizeTopologyEdges(stored.connBitmapEdges ?? []);
+    this.connBitmapPeerIds = sanitizePeerIds(stored.connBitmapPeerIds ?? []);
     this.peerCenter = new Map();
     for (const entry of stored.peerCenter ?? []) {
       if (!Number.isInteger(entry.peerId) || entry.peerId <= 0) continue;
@@ -1263,6 +1361,7 @@ export class RelayRoom implements DurableObject {
       ...(this.topologyUpdatedAt ? { topologyUpdatedAt: this.topologyUpdatedAt } : {}),
       routePeers: [...this.routePeers.values()],
       rawRoutePeerInfos: [...this.rawRoutePeerInfos.values()].map(cloneRoutePeerInfo),
+      connBitmapPeerIds: [...this.connBitmapPeerIds],
       connBitmapEdges: [...this.connBitmapEdges],
       peerCenter: [...this.peerCenter.entries()].map(([peerId, info]) => ({
         peerId,
@@ -1335,6 +1434,46 @@ export function toArrayBuffer(data: unknown): ArrayBuffer | null {
     return copy.buffer;
   }
   return null;
+}
+
+function emptyTrafficCounters(): TrafficCounters {
+  return { rxBytes: 0, txBytes: 0, rxPackets: 0, txPackets: 0, forwardedPackets: 0, unroutablePackets: 0, invalidPackets: 0 };
+}
+
+export function buildTrafficSample(previous: TrafficSample | undefined, counters: TrafficCounters, now: number): TrafficSample {
+  const elapsedSeconds = previous ? Math.max(0, (now - Date.parse(previous.timestamp)) / 1000) : 0;
+  const previousDrops = previous ? previous.unroutablePackets + previous.invalidPackets : 0;
+  const currentDrops = counters.unroutablePackets + counters.invalidPackets;
+  const rxPacketDelta = previous ? counters.rxPackets - previous.rxPackets : counters.rxPackets;
+  const dropDelta = previous ? currentDrops - previousDrops : currentDrops;
+
+  return {
+    timestamp: new Date(now).toISOString(),
+    rxBytes: counters.rxBytes,
+    txBytes: counters.txBytes,
+    rxPackets: counters.rxPackets,
+    txPackets: counters.txPackets,
+    forwardedPackets: counters.forwardedPackets,
+    unroutablePackets: counters.unroutablePackets,
+    invalidPackets: counters.invalidPackets,
+    rxBytesPerSecond: previous && elapsedSeconds > 0 ? rate(counters.rxBytes - previous.rxBytes, elapsedSeconds) : 0,
+    txBytesPerSecond: previous && elapsedSeconds > 0 ? rate(counters.txBytes - previous.txBytes, elapsedSeconds) : 0,
+    rxPacketsPerSecond: previous && elapsedSeconds > 0 ? rate(counters.rxPackets - previous.rxPackets, elapsedSeconds) : 0,
+    txPacketsPerSecond: previous && elapsedSeconds > 0 ? rate(counters.txPackets - previous.txPackets, elapsedSeconds) : 0,
+    relayDropRate: ratio(dropDelta, rxPacketDelta),
+  };
+}
+
+export function buildTrafficSummary(counters: TrafficCounters, latest: TrafficSample | undefined): TrafficSummary {
+  return {
+    rxBytesPerSecond: latest?.rxBytesPerSecond ?? 0,
+    txBytesPerSecond: latest?.txBytesPerSecond ?? 0,
+    rxPacketsPerSecond: latest?.rxPacketsPerSecond ?? 0,
+    txPacketsPerSecond: latest?.txPacketsPerSecond ?? 0,
+    relayDropRate: relayDropRate(counters),
+    totalRelayDropPackets: counters.unroutablePackets + counters.invalidPackets,
+    ...(latest ? { sampledAt: latest.timestamp } : {}),
+  };
 }
 
 async function decryptEasyTierPayload(payload: Uint8Array, keys: DerivedKeys): Promise<Uint8Array> {
@@ -1553,6 +1692,10 @@ function topologyEdgeSignature(edges: TopologyEdge[]): string {
   return JSON.stringify([...edges].sort(compareTopologyEdges).map((edge) => [edge.fromPeerId, edge.toPeerId, edge.source, edge.latencyMs]));
 }
 
+function peerIdSignature(peerIds: number[]): string {
+  return JSON.stringify([...peerIds].sort((a, b) => a - b));
+}
+
 function firstNetworkLength(infos: Map<number, RoutePeerInfo>): number | undefined {
   for (const info of infos.values()) {
     if (info.networkLength) return info.networkLength;
@@ -1624,6 +1767,19 @@ function edgesFromConnPeerList(conn: RouteConnPeerList): TopologyEdge[] {
   return edges.sort(compareTopologyEdges);
 }
 
+function peerIdsFromConnBitmap(conn: RouteConnBitmap): number[] {
+  return sanitizePeerIds(conn.peerIds.map((item) => item.peerId));
+}
+
+function peerIdsFromConnPeerList(conn: RouteConnPeerList): number[] {
+  const peerIds = new Set<number>();
+  for (const item of conn.peerConnInfos) {
+    if (item.peerId?.peerId) peerIds.add(item.peerId.peerId);
+    for (const peerId of item.connectedPeerIds) peerIds.add(peerId);
+  }
+  return sanitizePeerIds([...peerIds]);
+}
+
 function edgesFromPeerCenter(peerCenter: Map<number, { directPeers: Map<number, DirectConnectedPeerInfo> }>): TopologyEdge[] {
   const edges: TopologyEdge[] = [];
   for (const [fromPeerId, info] of peerCenter.entries()) {
@@ -1635,6 +1791,97 @@ function edgesFromPeerCenter(peerCenter: Map<number, { directPeers: Map<number, 
   return edges.sort(compareTopologyEdges);
 }
 
+export function buildConnectionMatrix(edges: TopologyEdge[], peerIds: Iterable<number> = []): ConnectionMatrixSnapshot {
+  const connected = new Map<number, Set<number>>();
+  const ensure = (peerId: number): Set<number> => {
+    let set = connected.get(peerId);
+    if (!set) {
+      set = new Set();
+      connected.set(peerId, set);
+    }
+    return set;
+  };
+  for (const peerId of peerIds) {
+    if (Number.isInteger(peerId) && peerId > 0) ensure(peerId);
+  }
+  for (const edge of edges) {
+    if (edge.source !== 'conn_bitmap') continue;
+    if (!Number.isInteger(edge.fromPeerId) || !Number.isInteger(edge.toPeerId) || edge.fromPeerId <= 0 || edge.toPeerId <= 0) continue;
+    ensure(edge.fromPeerId).add(edge.toPeerId);
+    ensure(edge.toPeerId);
+  }
+  const orderedPeerIds = [...connected.keys()].sort((a, b) => a - b);
+  return {
+    peerIds: orderedPeerIds,
+    rows: orderedPeerIds.map((peerId) => ({
+      peerId,
+      connectedPeerIds: [...(connected.get(peerId) ?? new Set<number>())].sort((a, b) => a - b),
+    })),
+  };
+}
+
+export function buildRoutePaths(
+  nodes: RoutePeerSnapshot[],
+  edges: TopologyEdge[],
+  livePeerIds: Set<number>,
+  rootPeerId = EDGE_PEER_ID,
+): RoutePathSnapshot[] {
+  const adjacency = new Map<number, Set<number>>();
+  const edgeKeys = new Set<string>();
+  const ensure = (peerId: number): Set<number> => {
+    let set = adjacency.get(peerId);
+    if (!set) {
+      set = new Set();
+      adjacency.set(peerId, set);
+    }
+    return set;
+  };
+  ensure(rootPeerId);
+  for (const edge of edges) {
+    if (edge.source !== 'conn_bitmap') continue;
+    ensure(edge.fromPeerId).add(edge.toPeerId);
+    ensure(edge.toPeerId);
+    edgeKeys.add(`${edge.fromPeerId}:${edge.toPeerId}`);
+  }
+  for (const peerId of livePeerIds) {
+    if (!peerId || peerId === rootPeerId) continue;
+    ensure(rootPeerId).add(peerId);
+    ensure(peerId).add(rootPeerId);
+    edgeKeys.add(`${rootPeerId}:${peerId}`);
+    edgeKeys.add(`${peerId}:${rootPeerId}`);
+  }
+
+  const paths = shortestPathsFrom(adjacency, rootPeerId);
+  return nodes
+    .filter((node) => node.peerId !== rootPeerId)
+    .map((node) => {
+      const pathPeerIds = paths.get(node.peerId) ?? [];
+      if (pathPeerIds.length === 0) {
+        return {
+          peerId: node.peerId,
+          pathPeerIds: [],
+          source: 'unreachable' as const,
+          cost: node.cost,
+          lossRate: node.lossRate,
+        };
+      }
+      const source: RoutePathSnapshot['source'] = pathPeerIds.length === 2 && livePeerIds.has(node.peerId) && edgeKeys.has(`${rootPeerId}:${node.peerId}`)
+        ? 'live_peer'
+        : 'conn_bitmap';
+      return {
+        peerId: node.peerId,
+        nextHopPeerId: pathPeerIds[1],
+        hopCount: pathPeerIds.length - 1,
+        pathPeerIds,
+        source,
+        latencyMs: pathLatencyMs(pathPeerIds, edges),
+        cost: node.cost,
+        lossRate: node.lossRate,
+      };
+    })
+    .sort((a, b) => a.peerId - b.peerId);
+}
+
 function mergeTopologyEdges(...groups: TopologyEdge[][]): TopologyEdge[] {
   const byKey = new Map<string, TopologyEdge>();
   for (const edge of groups.flat()) {
@@ -1644,13 +1891,20 @@ function mergeTopologyEdges(...groups: TopologyEdge[][]): TopologyEdge[] {
   return [...byKey.values()].sort(compareTopologyEdges);
 }
 
-export function buildTopologySummary(nodes: RoutePeerSnapshot[], edges: TopologyEdge[]): TopologySummary {
+export function buildTopologySummary(
+  nodes: RoutePeerSnapshot[],
+  edges: TopologyEdge[],
+  routes: RoutePathSnapshot[] = buildRoutePaths(nodes, edges, new Set(), EDGE_PEER_ID),
+  connectionMatrix: ConnectionMatrixSnapshot = buildConnectionMatrix(edges, nodes.map((node) => node.peerId)),
+  currentRelayDropRate = 0,
+): TopologySummary {
   const connBitmapEdgeCount = edges.filter((edge) => edge.source === 'conn_bitmap').length;
   const peerCenterEdgeCount = edges.filter((edge) => edge.source === 'peer_center').length;
   const latencyValues = edges
     .map((edge) => edge.latencyMs)
     .filter((latency): latency is number => latency !== undefined && Number.isFinite(latency));
   const latencyTotal = latencyValues.reduce((sum, latency) => sum + latency, 0);
+  const reachableRouteCount = routes.filter((route) => route.hopCount !== undefined).length;
   return {
     nodeCount: nodes.length,
     edgeCount: edges.length,
@@ -1659,6 +1913,10 @@ export function buildTopologySummary(nodes: RoutePeerSnapshot[], edges: Topology
     latencyEdgeCount: latencyValues.length,
     ...(latencyValues.length > 0 ? { averageLatencyMs: Math.round(latencyTotal / latencyValues.length) } : {}),
     ...(edges.length > 0 ? { peerCenterRatio: peerCenterEdgeCount / edges.length } : {}),
+    routeCount: routes.length,
+    reachableRouteCount,
+    connectionMatrixNodeCount: connectionMatrix.peerIds.length,
+    relayDropRate: currentRelayDropRate,
   };
 }
 
@@ -1700,6 +1958,71 @@ function peerCenterDigest(map: PeerCenterGlobalMap): bigint {
     hash = ((hash << 5n) - hash + BigInt(stable.charCodeAt(index))) & 0xffff_ffff_ffff_ffffn;
   }
   return hash;
+}
+
+function shortestPathsFrom(adjacency: Map<number, Set<number>>, rootPeerId: number): Map<number, number[]> {
+  const paths = new Map<number, number[]>([[rootPeerId, [rootPeerId]]]);
+  const queue = [rootPeerId];
+  for (let cursor = 0; cursor < queue.length; cursor += 1) {
+    const peerId = queue[cursor];
+    const path = paths.get(peerId)!;
+    const nextPeers = [...(adjacency.get(peerId) ?? new Set<number>())].sort((a, b) => a - b);
+    for (const nextPeerId of nextPeers) {
+      if (paths.has(nextPeerId)) continue;
+      paths.set(nextPeerId, [...path, nextPeerId]);
+      queue.push(nextPeerId);
+    }
+  }
+  return paths;
+}
+
+function pathLatencyMs(pathPeerIds: number[], edges: TopologyEdge[]): number | undefined {
+  if (pathPeerIds.length < 2) return 0;
+  let total = 0;
+  for (let index = 0; index < pathPeerIds.length - 1; index += 1) {
+    const latency = latencyBetween(pathPeerIds[index], pathPeerIds[index + 1], edges);
+    if (latency === undefined) return undefined;
+    total += latency;
+  }
+  return total;
+}
+
+function latencyBetween(fromPeerId: number, toPeerId: number, edges: TopologyEdge[]): number | undefined {
+  const values = edges
+    .filter((edge) => edge.source === 'peer_center' && edge.latencyMs !== undefined && (
+      (edge.fromPeerId === fromPeerId && edge.toPeerId === toPeerId)
+      || (edge.fromPeerId === toPeerId && edge.toPeerId === fromPeerId)
+    ))
+    .map((edge) => edge.latencyMs!)
+    .filter(Number.isFinite);
+  if (values.length === 0) return undefined;
+  return Math.min(...values);
+}
+
+function peerLatenciesByPeer(edges: TopologyEdge[]): Map<number, number> {
+  const out = new Map<number, number>();
+  for (const edge of edges) {
+    if (edge.source !== 'peer_center' || edge.latencyMs === undefined || !Number.isFinite(edge.latencyMs)) continue;
+    const currentFrom = out.get(edge.fromPeerId);
+    const currentTo = out.get(edge.toPeerId);
+    if (currentFrom === undefined || edge.latencyMs < currentFrom) out.set(edge.fromPeerId, edge.latencyMs);
+    if (currentTo === undefined || edge.latencyMs < currentTo) out.set(edge.toPeerId, edge.latencyMs);
+  }
+  return out;
+}
+
+function rate(delta: number, elapsedSeconds: number): number {
+  if (!Number.isFinite(delta) || !Number.isFinite(elapsedSeconds) || elapsedSeconds <= 0) return 0;
+  return Math.max(0, Math.round(delta / elapsedSeconds));
+}
+
+function ratio(numerator: number, denominator: number): number {
+  if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || denominator <= 0) return 0;
+  return Math.max(0, Math.min(1, numerator / denominator));
+}
+
+function relayDropRate(counters: TrafficCounters): number {
+  return ratio(counters.unroutablePackets + counters.invalidPackets, counters.rxPackets);
 }
 
 export function resolveNetworkConfig(env: Pick<Env, 'EASYTIER_NETWORK_NAME' | 'EASYTIER_NETWORK_SECRET' | 'EASYTIER_NETWORK_SECRETS' | 'EASYTIER_NETWORKS'>, roomId: string): NetworkConfig {
@@ -1846,6 +2169,12 @@ function sanitizeTopologyEdges(edges: TopologyEdge[]): TopologyEdge[] {
     && (edge.source === 'conn_bitmap' || edge.source === 'peer_center')
     && (edge.latencyMs === undefined || Number.isFinite(edge.latencyMs))
   ));
+}
+
+function sanitizePeerIds(peerIds: number[]): number[] {
+  return [...new Set(peerIds)]
+    .filter((peerId) => Number.isInteger(peerId) && peerId > 0)
+    .sort((a, b) => a - b);
 }
 
 function describeFrameSplitFailure(message: ArrayBuffer): string {
