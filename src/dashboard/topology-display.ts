@@ -20,6 +20,14 @@ export interface TopologyGraphPosition extends TopologyGraphNode {
   y: number;
 }
 
+export interface EdgeLabelPosition {
+  linkKey: string;
+  x: number;
+  y: number;
+  offsetX: number;
+  offsetY: number;
+}
+
 type SimulationNode = TopologyGraphPosition & {
   vx: number;
   vy: number;
@@ -247,6 +255,113 @@ function nodeCollisionRadius(peerId: number, degree: number): number {
 
 function goldenAngle(index: number): number {
   return index * Math.PI * (3 - Math.sqrt(5));
+}
+
+export function computeEdgeLabelPositions(
+  links: TopologyGraphLink[],
+  positions: Map<number, TopologyGraphPosition>
+): EdgeLabelPosition[] {
+  const labelPositions: EdgeLabelPosition[] = [];
+  const occupiedRegions: Array<{ x: number; y: number; radius: number }> = [];
+
+  for (const link of links) {
+    const from = positions.get(link.fromPeerId);
+    const to = positions.get(link.toPeerId);
+    if (!from || !to) continue;
+
+    const midX = (from.x + to.x) / 2;
+    const midY = (from.y + to.y) / 2;
+    let offsetX = 0;
+    let offsetY = 0;
+
+    // Check if this position would overlap with existing labels
+    const labelRadius = 20;
+    let attempts = 0;
+    const maxAttempts = 8;
+
+    while (attempts < maxAttempts) {
+      const testX = midX + offsetX;
+      const testY = midY + offsetY;
+
+      const overlaps = occupiedRegions.some(region => {
+        const dx = testX - region.x;
+        const dy = testY - region.y;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+        return distance < (labelRadius + region.radius);
+      });
+
+      if (!overlaps) {
+        break;
+      }
+
+      // Try different offset positions
+      const angle = (attempts / maxAttempts) * Math.PI * 2;
+      offsetX = Math.cos(angle) * 18;
+      offsetY = Math.sin(angle) * 18;
+      attempts++;
+    }
+
+    const linkKey = `${link.fromPeerId}-${link.toPeerId}`;
+    labelPositions.push({
+      linkKey,
+      x: midX,
+      y: midY,
+      offsetX,
+      offsetY,
+    });
+
+    occupiedRegions.push({
+      x: midX + offsetX,
+      y: midY + offsetY,
+      radius: labelRadius,
+    });
+  }
+
+  return labelPositions;
+}
+
+export function detectEdgeCrossings(
+  links: TopologyGraphLink[],
+  positions: Map<number, TopologyGraphPosition>
+): number {
+  let crossingCount = 0;
+  const edges = links.map(link => ({
+    from: positions.get(link.fromPeerId),
+    to: positions.get(link.toPeerId),
+  })).filter((edge): edge is { from: TopologyGraphPosition; to: TopologyGraphPosition } =>
+    edge.from !== undefined && edge.to !== undefined
+  );
+
+  for (let i = 0; i < edges.length; i++) {
+    for (let j = i + 1; j < edges.length; j++) {
+      const e1 = edges[i];
+      const e2 = edges[j];
+
+      // Skip if edges share a node
+      if (e1.from === e2.from || e1.from === e2.to || e1.to === e2.from || e1.to === e2.to) {
+        continue;
+      }
+
+      if (lineSegmentsIntersect(e1.from.x, e1.from.y, e1.to.x, e1.to.y, e2.from.x, e2.from.y, e2.to.x, e2.to.y)) {
+        crossingCount++;
+      }
+    }
+  }
+
+  return crossingCount;
+}
+
+function lineSegmentsIntersect(
+  x1: number, y1: number, x2: number, y2: number,
+  x3: number, y3: number, x4: number, y4: number
+): boolean {
+  const denom = (y4 - y3) * (x2 - x1) - (x4 - x3) * (y2 - y1);
+  if (Math.abs(denom) < 0.0001) return false; // Parallel or coincident
+
+  const ua = ((x4 - x3) * (y1 - y3) - (y4 - y3) * (x1 - x3)) / denom;
+  const ub = ((x2 - x1) * (y1 - y3) - (y2 - y1) * (x1 - x3)) / denom;
+
+  return ua > 0.001 && ua < 0.999 && ub > 0.001 && ub < 0.999;
 }
 
 function stablePeerAngle(peerId: number): number {

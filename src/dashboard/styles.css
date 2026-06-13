@@ -267,27 +267,17 @@ body {
 }
 
 .graph-edge {
+  stroke: var(--color-kumo-subtle);
   stroke-linecap: round;
-  stroke-width: 1.8;
-  opacity: 0.58;
+  stroke-width: 2;
+  opacity: 0.7;
   vector-effect: non-scaling-stroke;
   transition: opacity 160ms ease, stroke-width 160ms ease;
 }
 
-.graph-edge.conn-bitmap {
-  stroke: var(--color-kumo-brand, #2563eb);
-}
-
-.graph-edge.peer-center {
-  stroke: var(--color-kumo-success, #11845b);
-  stroke-dasharray: 6 6;
-}
-
-.graph-edge.hybrid {
-  stroke: var(--color-kumo-brand, #2563eb);
-  stroke-width: 2.8;
-  stroke-dasharray: 10 4 2 4;
-  opacity: 0.76;
+.graph-edge:hover {
+  opacity: 1;
+  stroke-width: 2.5;
 }
 
 .graph-edge-label {
@@ -323,15 +313,27 @@ body {
   max-width: 120px;
 }
 
+.graph-node-nat-icon {
+  font-size: 14px;
+  opacity: 0.9;
+  stroke-width: 0;
+  paint-order: normal;
+}
+
 .graph-node-group {
   opacity: 1;
 }
 
 .graph-node {
-  fill: var(--color-kumo-recessed);
-  stroke: var(--color-kumo-brand, #2563eb);
+  fill: var(--color-kumo-brand);
+  stroke: var(--color-kumo-base);
   stroke-width: 2;
   vector-effect: non-scaling-stroke;
+  transition: r 160ms ease, stroke-width 160ms ease;
+}
+
+.graph-node-group:hover .graph-node {
+  stroke-width: 3;
 }
 
 .matrix-scroll {

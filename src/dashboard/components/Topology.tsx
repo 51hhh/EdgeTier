@@ -4,8 +4,9 @@ import type { ConnectionMatrixSnapshot, RoutePathSnapshot, RoutePeerSnapshot, To
 import { EDGE_PEER_ID } from '../../easytier/constants';
 import { formatPercent } from '../format';
 import type { Translator } from '../i18n';
+import { nodeColorForPeerId, natStyleFor } from '../nat-styles';
 import { compactPeerDisplayName, peerDisplayName, peerFullLabel, shortPeerId } from '../peer-display';
-import { buildTopologyGraphLinks, computeTopologyGraphLayout, topologyGraphPeerIds, type TopologyGraphLink, type TopologyGraphPosition } from '../topology-display';
+import { buildTopologyGraphLinks, computeEdgeLabelPositions, computeTopologyGraphLayout, detectEdgeCrossings, topologyGraphPeerIds, type TopologyGraphLink, type TopologyGraphPosition } from '../topology-display';
 
 interface TopologyProps {
   topology?: TopologySnapshot | null;
@@ -137,6 +138,11 @@ function ConnectionGraph({ topology, nodeByPeerId, t }: { topology?: TopologySna
   const targetLayout = useMemo(() => computeTopologyGraphLayout(graphPeerIds, graphLinks, GRAPH_WIDTH, GRAPH_HEIGHT), [layoutSignature]);
   const animatedLayout = useAnimatedGraphLayout(targetLayout, graphLinks);
   const positions = useMemo(() => new Map(animatedLayout.map((position) => [position.peerId, position])), [animatedLayout]);
+  const labelPositions = useMemo(() => {
+    const edgeLabels = computeEdgeLabelPositions(graphLinks, positions);
+    return new Map(edgeLabels.map((label) => [label.linkKey, label]));
+  }, [graphLinks, positions]);
+  const crossingCount = useMemo(() => detectEdgeCrossings(graphLinks, positions), [graphLinks, positions]);
   if (graphPeerIds.length === 0) {
     return <LayerCard>
       <LayerCard.Secondary>{t('topology.connectionGraph')}</LayerCard.Secondary>
@@ -149,7 +155,10 @@ function ConnectionGraph({ topology, nodeByPeerId, t }: { topology?: TopologySna
       <div className="stack compact">
         <div className="graph-toolbar">
           <Text as="p" variant="secondary" size="sm">{t('topology.connectionGraphHelp')}</Text>
-          <Badge variant="outline">{t('topology.graphStats', { nodes: graphPeerIds.length, edges: graphLinks.length })}</Badge>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <Badge variant="outline">{t('topology.graphStats', { nodes: graphPeerIds.length, edges: graphLinks.length })}</Badge>
+            {crossingCount > 0 && <Badge variant="beta">{crossingCount} crossings</Badge>}
+          </div>
         </div>
         <div className="topology-graph" role="img" aria-label={t('topology.connectionGraph')}>
           <svg viewBox={`0 0 ${GRAPH_WIDTH} ${GRAPH_HEIGHT}`}>
@@ -158,11 +167,13 @@ function ConnectionGraph({ topology, nodeByPeerId, t }: { topology?: TopologySna
               const to = positions.get(link.toPeerId);
               if (!from || !to) return null;
               const label = graphLinkLabel(link, graphLinks.length);
-              const labelX = Math.round((from.x + to.x) / 2);
-              const labelY = Math.round((from.y + to.y) / 2);
-              return <g key={`${link.fromPeerId}-${link.toPeerId}`}>
+              const linkKey = `${link.fromPeerId}-${link.toPeerId}`;
+              const labelPos = labelPositions.get(linkKey);
+              const labelX = labelPos ? Math.round(labelPos.x + labelPos.offsetX) : Math.round((from.x + to.x) / 2);
+              const labelY = labelPos ? Math.round(labelPos.y + labelPos.offsetY) : Math.round((from.y + to.y) / 2);
+              return <g key={linkKey}>
                 <title>{graphLinkTitle(link, nodeByPeerId, t)}</title>
-                <line className={`graph-edge ${graphLinkClass(link)}`} x1={from.x} y1={from.y} x2={to.x} y2={to.y} />
+                <line className="graph-edge" x1={from.x} y1={from.y} x2={to.x} y2={to.y} />
                 {label && <g className="graph-edge-label-group" transform={`translate(${labelX} ${labelY})`}>
                   <rect className="graph-edge-label-bg" x={edgeLabelBgX(label)} y={-9} width={edgeLabelBgWidth(label)} height={16} rx={4} />
                   <text className="graph-edge-label" x={0} y={3}>{label}</text>
@@ -173,11 +184,24 @@ function ConnectionGraph({ topology, nodeByPeerId, t }: { topology?: TopologySna
               const pos = positions.get(peerId);
               if (!pos) return null;
               const node = peerFor(peerId, nodeByPeerId);
+              const nodeColor = nodeColorForPeerId(node.peerId, node.udpNatType);
+              const natStyle = natStyleFor(node.udpNatType, node.tcpNatType);
               return <g key={node.peerId} className="graph-node-group" transform={`translate(${pos.x} ${pos.y})`}>
-                <title>{peerFullLabel(node, t('common.unknownPeer'))}</title>
-                <circle className="graph-node" cx={0} cy={0} r={nodeRadius(pos)} />
+                <title>{peerFullLabel(node, t('common.unknownPeer')) + (node.udpNatType ? ` | NAT: ${node.udpNatType}` : '')}</title>
+                <circle
+                  className="graph-node"
+                  cx={0}
+                  cy={0}
+                  r={nodeRadius(pos)}
+                  style={{
+                    fill: nodeColor,
+                    strokeWidth: natStyle.strokeWidth || 2,
+                    strokeDasharray: natStyle.strokeDasharray || 'none'
+                  }}
+                />
                 <text className="graph-node-label" x={0} y={4}>{shortPeerId(node.peerId)}</text>
                 <text className="graph-node-host-label" x={0} y={nodeRadius(pos) + 16}>{compactPeerDisplayName(node, t('common.routeDataPending'))}</text>
+                {natStyle.icon && <text className="graph-node-nat-icon" x={nodeRadius(pos) - 6} y={-nodeRadius(pos) + 8} style={{ fontSize: '14px' }}>{natStyle.icon}</text>}
               </g>;
             })}
           </svg>
@@ -377,11 +401,6 @@ function graphLayoutSignature(peerIds: number[], links: TopologyGraphLink[]): st
     .map((link) => `${link.fromPeerId}:${link.toPeerId}:${link.sources.join('+')}:${link.directedCount}:${link.latencyMs ?? ''}`)
     .join('|');
   return `${peerKey}#${linkKey}`;
-}
-
-function graphLinkClass(link: TopologyGraphLink): string {
-  if (link.sources.includes('conn_bitmap') && link.sources.includes('peer_center')) return 'hybrid';
-  return link.sources.includes('peer_center') ? 'peer-center' : 'conn-bitmap';
 }
 
 function nodeRadius(node: TopologyGraphPosition): number {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildTopologyGraphLinks, buildTopologyGraphNodes, computeTopologyGraphLayout, topologyGraphPeerIds } from './topology-display';
+import { buildTopologyGraphLinks, buildTopologyGraphNodes, computeEdgeLabelPositions, computeTopologyGraphLayout, detectEdgeCrossings, topologyGraphPeerIds } from './topology-display';
 
 describe('dashboard topology display helpers', () => {
   it('aggregates directed topology edges into readable graph links', () => {
@@ -76,5 +76,44 @@ describe('dashboard topology display helpers', () => {
     ]);
 
     expect(topologyGraphPeerIds([1], links)).toEqual([1, 2, 3]);
+  });
+
+  it('computes edge label positions to avoid overlaps', () => {
+    const links = buildTopologyGraphLinks([
+      { fromPeerId: 1, toPeerId: 2, source: 'conn_bitmap' },
+      { fromPeerId: 1, toPeerId: 3, source: 'peer_center', latencyMs: 8 },
+      { fromPeerId: 2, toPeerId: 3, source: 'conn_bitmap' },
+    ]);
+
+    const layout = computeTopologyGraphLayout([1, 2, 3], links, 760, 360);
+    const positions = new Map(layout.map((node) => [node.peerId, node]));
+    const labelPositions = computeEdgeLabelPositions(links, positions);
+
+    expect(labelPositions).toHaveLength(3);
+    for (const label of labelPositions) {
+      expect(label).toHaveProperty('x');
+      expect(label).toHaveProperty('y');
+      expect(label).toHaveProperty('offsetX');
+      expect(label).toHaveProperty('offsetY');
+    }
+  });
+
+  it('detects edge crossings in graph layout', () => {
+    const links = buildTopologyGraphLinks([
+      { fromPeerId: 1, toPeerId: 3, source: 'conn_bitmap' },
+      { fromPeerId: 2, toPeerId: 4, source: 'conn_bitmap' },
+    ]);
+
+    const layout = [
+      { peerId: 1, degree: 1, radius: 18, collisionRadius: 54, x: 100, y: 100 },
+      { peerId: 2, degree: 1, radius: 18, collisionRadius: 54, x: 200, y: 100 },
+      { peerId: 3, degree: 1, radius: 18, collisionRadius: 54, x: 200, y: 200 },
+      { peerId: 4, degree: 1, radius: 18, collisionRadius: 54, x: 100, y: 200 },
+    ];
+
+    const positions = new Map(layout.map((node) => [node.peerId, node]));
+    const crossings = detectEdgeCrossings(links, positions);
+
+    expect(crossings).toBe(1);
   });
 });
