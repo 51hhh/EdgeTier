@@ -332,10 +332,10 @@ export class RelayRoom implements DurableObject {
     session.keys = deriveKeys(networkConfig.secret);
     session.handshakeAccepted = true;
     ensureOspfRouteSession(session);
-    this.sendFrame(session, clientReq.myPeerId, EasyTierPacketType.HandShake, encodeHandshake(response));
+    this.sendFrame(session, clientPeerId, EasyTierPacketType.HandShake, encodeHandshake(response));
     this.addEvent(session.roomId, 'handshake_seen', 'handshake accepted', session);
     this.queueDirectorySync(session.roomId, true);
-    this.state.waitUntil(this.bootstrapControlPlane(session, clientReq.myPeerId).catch(() => {
+    this.state.waitUntil(this.bootstrapControlPlane(session, clientPeerId).catch(() => {
       this.addEvent(session.roomId, 'decode_error', 'control-plane bootstrap failed', session);
     }));
   }
