@@ -1,6 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import { EDGE_PEER_ID } from '../easytier/constants';
-import { buildRouteConnBitmapForUpdate, buildRouteUpdatePeerIds, buildTopologySummary, framePeerBindingCandidate, resolveDefaultRoomConfig, resolveNetworkConfig, resolveOutboundTcpPeers, toArrayBuffer } from './relay-room';
+import {
+  applyOspfRouteSessionResponse,
+  buildRouteConnBitmapForUpdate,
+  buildRouteUpdatePeerIds,
+  buildTopologySummary,
+  createOspfRouteSessionState,
+  framePeerBindingCandidate,
+  resolveDefaultRoomConfig,
+  resolveNetworkConfig,
+  resolveOutboundTcpPeers,
+  selectRoutePeerInfosForSync,
+  toArrayBuffer,
+  updateOspfRouteSessionFromRequest,
+} from './relay-room';
 
 function bitmapHas(bitmap: Uint8Array, size: number, row: number, col: number): boolean {
   const bitIndex = row * size + col;
@@ -128,6 +141,11 @@ describe('resolveOutboundTcpPeers', () => {
       { uri: 'tcp://example.com:11010', hostname: 'example.com', port: 11010 },
     ]);
   });
+
+  it('does not start outbound TCP for script-error room ids', () => {
+    expect(resolveOutboundTcpPeers({ EASYTIER_PUBLIC_PEER_TCP: 'tcp://example.com:11010' }, 'null')).toEqual([]);
+    expect(resolveOutboundTcpPeers({ EASYTIER_PUBLIC_PEER_TCP: 'tcp://example.com:11010' }, 'undefined')).toEqual([]);
+  });
 });
 
 describe('buildRouteConnBitmapForUpdate', () => {
@@ -160,6 +178,65 @@ describe('buildRouteUpdatePeerIds', () => {
       [42],
       [200, 300, 200, -1],
     )).toEqual([42, 100, 200, 300, EDGE_PEER_ID]);
+  });
+});
+
+describe('OSPF route session state', () => {
+  it('tracks remote session changes, initiator state, and saved versions from requests', () => {
+    const state = createOspfRouteSessionState(1n);
+    updateOspfRouteSessionFromRequest(state, {
+      myPeerId: 42,
+      mySessionId: 2n,
+      isInitiator: true,
+      peerInfos: [
+        { peerId: 42, proxyCidrs: [], version: 3 },
+        { peerId: 100, proxyCidrs: [], version: 4 },
+      ],
+      connPeerList: {
+        peerConnInfos: [
+          { peerId: { peerId: 42, version: 5 }, connectedPeerIds: [100] },
+          { peerId: { peerId: 100, version: 6 }, connectedPeerIds: [42] },
+        ],
+      },
+    }, 42);
+
+    expect(state.remoteSessionId).toBe(2n);
+    expect(state.remoteIsInitiator).toBe(true);
+    expect(state.weAreInitiator).toBe(false);
+    expect(state.dstSavedPeerInfoVersions.get(42)).toBeUndefined();
+    expect(state.dstSavedPeerInfoVersions.get(100)).toBe(4);
+    expect(state.dstSavedConnInfoVersions.get(42)).toBeUndefined();
+    expect(state.dstSavedConnInfoVersions.get(100)).toBe(6);
+  });
+
+  it('acks pending route sync versions only after SyncRouteInfoResponse', () => {
+    const state = createOspfRouteSessionState(10n);
+    const pending = {
+      peerInfos: [
+        { peerId: EDGE_PEER_ID, proxyCidrs: [], version: 7 },
+        { peerId: 42, proxyCidrs: [], version: 8 },
+        { peerId: 100, proxyCidrs: [], version: 9 },
+      ],
+      connBitmap: {
+        peerIds: [
+          { peerId: EDGE_PEER_ID, version: 7 },
+          { peerId: 42, version: 8 },
+          { peerId: 100, version: 9 },
+        ],
+        bitmap: new Uint8Array([0xff, 0x01]),
+      },
+    };
+
+    expect(selectRoutePeerInfosForSync(state, pending.peerInfos, 42, false).map((info) => info.peerId)).toEqual([EDGE_PEER_ID, 100]);
+    expect(applyOspfRouteSessionResponse(state, { isInitiator: false, sessionId: 20n }, pending, 42, 1234)).toBe(true);
+    expect(state.remoteSessionId).toBe(20n);
+    expect(state.remoteIsInitiator).toBe(false);
+    expect(state.needSyncInitiatorInfo).toBe(false);
+    expect(state.lastSyncSuccessAt).toBe(1234);
+    expect(state.dstSavedPeerInfoVersions.get(EDGE_PEER_ID)).toBe(7);
+    expect(state.dstSavedPeerInfoVersions.get(42)).toBeUndefined();
+    expect(state.dstSavedPeerInfoVersions.get(100)).toBe(9);
+    expect(selectRoutePeerInfosForSync(state, pending.peerInfos, 42, false)).toEqual([]);
   });
 });
 

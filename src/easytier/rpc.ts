@@ -89,12 +89,28 @@ export interface RouteConnBitmap {
   bitmap: Uint8Array;
 }
 
+export interface RouteConnPeerInfo {
+  peerId?: PeerIdVersion;
+  connectedPeerIds: number[];
+}
+
+export interface RouteConnPeerList {
+  peerConnInfos: RouteConnPeerInfo[];
+}
+
 export interface SyncRouteInfoRequest {
   myPeerId?: number;
   mySessionId?: bigint;
   isInitiator?: boolean;
   peerInfos: RoutePeerInfo[];
   connBitmap?: RouteConnBitmap;
+  connPeerList?: RouteConnPeerList;
+}
+
+export interface SyncRouteInfoResponse {
+  isInitiator?: boolean;
+  sessionId?: bigint;
+  error?: number;
 }
 
 export interface DirectConnectedPeerInfo {
@@ -125,6 +141,17 @@ export type DecodedRpcService =
   | 'OspfRouteRpc.SyncRouteInfo'
   | 'PeerCenterRpc.ReportPeers'
   | 'PeerCenterRpc.GetGlobalPeerMap'
+  | 'DirectConnectorRpc.GetIpList'
+  | 'DirectConnectorRpc.SendUdpHolePunchPacket'
+  | 'DirectConnectorRpc'
+  | 'UdpHolePunchRpc.SelectPunchListener'
+  | 'UdpHolePunchRpc.SendPunchPacketCone'
+  | 'UdpHolePunchRpc.SendPunchPacketHardSym'
+  | 'UdpHolePunchRpc.SendPunchPacketEasySym'
+  | 'UdpHolePunchRpc.SendPunchPacketBothEasySym'
+  | 'UdpHolePunchRpc'
+  | 'TcpHolePunchRpc.ExchangeMappedAddr'
+  | 'TcpHolePunchRpc'
   | 'unknown';
 
 export interface DecodedEasyTierRpc {
@@ -134,6 +161,7 @@ export interface DecodedEasyTierRpc {
   service: DecodedRpcService;
   message: string;
   syncRouteInfo?: SyncRouteInfoRequest;
+  syncRouteResponse?: SyncRouteInfoResponse;
   reportPeers?: ReportPeersRequest;
   getGlobalPeerMap?: GetGlobalPeerMapRequest;
   globalPeerMap?: PeerCenterGlobalMap;
@@ -210,12 +238,17 @@ export function decodeEasyTierRpcPayload(payload: Uint8Array): DecodedEasyTierRp
   const effectiveDescriptor = descriptor ?? request?.descriptor;
   if (isOspfRouteRpc(effectiveDescriptor)) {
     if (packet.isRequest === false) {
+      const rpcResponse = decodeRpcResponse(packet.body);
+      const syncRouteResponse = decodeSyncRouteInfoResponse(rpcResponse.response);
       return {
         packet,
         descriptor: effectiveDescriptor,
         request,
         service: 'OspfRouteRpc.SyncRouteInfo',
-        message: 'route sync RPC response decoded',
+        message: syncRouteResponse.error === undefined
+          ? 'route sync RPC response decoded'
+          : `route sync RPC response decoded with error ${syncRouteResponse.error}`,
+        syncRouteResponse,
       };
     }
     const syncRouteInfo = decodeSyncRouteInfoRequest(innerBody);
@@ -285,6 +318,61 @@ export function decodeEasyTierRpcPayload(payload: Uint8Array): DecodedEasyTierRp
     };
   }
 
+  if (isDirectConnectorRpc(effectiveDescriptor)) {
+    const method = effectiveDescriptor?.methodIndex ?? 0;
+    const direction = packet.isRequest === false ? 'response' : 'request';
+    if (method === 0 || method === 1) {
+      return {
+        packet,
+        descriptor: effectiveDescriptor,
+        request,
+        service: 'DirectConnectorRpc.GetIpList',
+        message: `direct connector GetIpList RPC ${direction} decoded`,
+      };
+    }
+    if (method === 2) {
+      return {
+        packet,
+        descriptor: effectiveDescriptor,
+        request,
+        service: 'DirectConnectorRpc.SendUdpHolePunchPacket',
+        message: `direct connector SendUdpHolePunchPacket RPC ${direction} decoded`,
+      };
+    }
+    return {
+      packet,
+      descriptor: effectiveDescriptor,
+      request,
+      service: 'DirectConnectorRpc',
+      message: `direct connector RPC ${direction} decoded`,
+    };
+  }
+
+  if (isUdpHolePunchRpc(effectiveDescriptor)) {
+    const method = effectiveDescriptor?.methodIndex ?? 0;
+    const direction = packet.isRequest === false ? 'response' : 'request';
+    const service = udpHolePunchService(method);
+    return {
+      packet,
+      descriptor: effectiveDescriptor,
+      request,
+      service,
+      message: `${service} RPC ${direction} decoded`,
+    };
+  }
+
+  if (isTcpHolePunchRpc(effectiveDescriptor)) {
+    const direction = packet.isRequest === false ? 'response' : 'request';
+    const service = (effectiveDescriptor?.methodIndex ?? 0) === 1 ? 'TcpHolePunchRpc.ExchangeMappedAddr' : 'TcpHolePunchRpc';
+    return {
+      packet,
+      descriptor: effectiveDescriptor,
+      request,
+      service,
+      message: `${service} RPC ${direction} decoded`,
+    };
+  }
+
   return {
     packet,
     descriptor: effectiveDescriptor,
@@ -348,9 +436,23 @@ export function decodeSyncRouteInfoRequest(payload: Uint8Array): SyncRouteInfoRe
     else if (tag.field === 3 && tag.wire === 0) req.isInitiator = r.bool();
     else if (tag.field === 4 && tag.wire === 2) req.peerInfos = decodeRoutePeerInfos(r.bytes());
     else if (tag.field === 5 && tag.wire === 2) req.connBitmap = decodeRouteConnBitmap(r.bytes());
+    else if (tag.field === 7 && tag.wire === 2) req.connPeerList = decodeRouteConnPeerList(r.bytes());
     else r.skip(tag.wire);
   }
   return req;
+}
+
+export function decodeSyncRouteInfoResponse(payload: Uint8Array): SyncRouteInfoResponse {
+  const r = new ProtoReader(payload);
+  const response: SyncRouteInfoResponse = {};
+  while (!r.done) {
+    const tag = r.tag();
+    if (tag.field === 1 && tag.wire === 0) response.isInitiator = r.bool();
+    else if (tag.field === 2 && tag.wire === 0) response.sessionId = r.uint64();
+    else if (tag.field === 3 && tag.wire === 0) response.error = r.int32();
+    else r.skip(tag.wire);
+  }
+  return response;
 }
 
 export function encodeSyncRouteInfoResponse(response: { isInitiator: boolean; sessionId: bigint | number | string }): Uint8Array {
@@ -366,7 +468,8 @@ export function encodeSyncRouteInfoRequest(request: SyncRouteInfoRequest): Uint8
   writeUint64Field(out, 2, request.mySessionId);
   writeBoolField(out, 3, request.isInitiator);
   if (request.peerInfos.length > 0) writeBytesField(out, 4, encodeRoutePeerInfos(request.peerInfos));
-  if (request.connBitmap) writeBytesField(out, 5, encodeRouteConnBitmap(request.connBitmap));
+  if (request.connPeerList) writeBytesField(out, 7, encodeRouteConnPeerList(request.connPeerList));
+  else if (request.connBitmap) writeBytesField(out, 5, encodeRouteConnBitmap(request.connBitmap));
   return finish(out);
 }
 
@@ -395,6 +498,14 @@ export function buildRpcRequestPayload(request: {
 }
 
 export function encodeReportPeersResponse(): Uint8Array {
+  return new Uint8Array(0);
+}
+
+export function encodeDirectConnectorGetIpListResponse(): Uint8Array {
+  return new Uint8Array(0);
+}
+
+export function encodeVoidResponse(): Uint8Array {
   return new Uint8Array(0);
 }
 
@@ -572,6 +683,42 @@ function encodeRouteConnBitmap(conn: RouteConnBitmap): Uint8Array {
   const out: number[] = [];
   for (const item of conn.peerIds) writeBytesField(out, 1, encodePeerIdVersion(item));
   writeBytesField(out, 2, conn.bitmap);
+  return finish(out);
+}
+
+function decodeRouteConnPeerList(payload: Uint8Array): RouteConnPeerList {
+  const r = new ProtoReader(payload);
+  const list: RouteConnPeerList = { peerConnInfos: [] };
+  while (!r.done) {
+    const tag = r.tag();
+    if (tag.field === 1 && tag.wire === 2) list.peerConnInfos.push(decodeRouteConnPeerInfo(r.bytes()));
+    else r.skip(tag.wire);
+  }
+  return list;
+}
+
+function encodeRouteConnPeerList(list: RouteConnPeerList): Uint8Array {
+  const out: number[] = [];
+  for (const item of list.peerConnInfos) writeBytesField(out, 1, encodeRouteConnPeerInfo(item));
+  return finish(out);
+}
+
+function decodeRouteConnPeerInfo(payload: Uint8Array): RouteConnPeerInfo {
+  const r = new ProtoReader(payload);
+  const info: RouteConnPeerInfo = { connectedPeerIds: [] };
+  while (!r.done) {
+    const tag = r.tag();
+    if (tag.field === 1 && tag.wire === 2) info.peerId = decodePeerIdVersion(r.bytes());
+    else if (tag.field === 2 && tag.wire === 0) info.connectedPeerIds.push(r.uint32());
+    else r.skip(tag.wire);
+  }
+  return info;
+}
+
+function encodeRouteConnPeerInfo(info: RouteConnPeerInfo): Uint8Array {
+  const out: number[] = [];
+  if (info.peerId) writeBytesField(out, 1, encodePeerIdVersion(info.peerId));
+  for (const peerId of info.connectedPeerIds) writeUint32Field(out, 2, peerId);
   return finish(out);
 }
 
@@ -772,6 +919,33 @@ function isPeerCenterRpc(descriptor: RpcDescriptor | undefined): boolean {
   if (!descriptor) return false;
   const service = descriptor.serviceName ?? '';
   return service === 'PeerCenterRpc' || service === 'peer_rpc.PeerCenterRpc';
+}
+
+function isDirectConnectorRpc(descriptor: RpcDescriptor | undefined): boolean {
+  if (!descriptor) return false;
+  const service = descriptor.serviceName ?? '';
+  return service === 'DirectConnectorRpc' || service === 'peer_rpc.DirectConnectorRpc';
+}
+
+function isUdpHolePunchRpc(descriptor: RpcDescriptor | undefined): boolean {
+  if (!descriptor) return false;
+  const service = descriptor.serviceName ?? '';
+  return service === 'UdpHolePunchRpc' || service === 'peer_rpc.UdpHolePunchRpc';
+}
+
+function isTcpHolePunchRpc(descriptor: RpcDescriptor | undefined): boolean {
+  if (!descriptor) return false;
+  const service = descriptor.serviceName ?? '';
+  return service === 'TcpHolePunchRpc' || service === 'peer_rpc.TcpHolePunchRpc';
+}
+
+function udpHolePunchService(methodIndex: number): DecodedRpcService {
+  if (methodIndex === 1) return 'UdpHolePunchRpc.SelectPunchListener';
+  if (methodIndex === 2) return 'UdpHolePunchRpc.SendPunchPacketCone';
+  if (methodIndex === 3) return 'UdpHolePunchRpc.SendPunchPacketHardSym';
+  if (methodIndex === 4) return 'UdpHolePunchRpc.SendPunchPacketEasySym';
+  if (methodIndex === 5) return 'UdpHolePunchRpc.SendPunchPacketBothEasySym';
+  return 'UdpHolePunchRpc';
 }
 
 function safeText(bytes: Uint8Array): string {

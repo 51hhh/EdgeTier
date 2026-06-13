@@ -7,11 +7,13 @@ import {
   buildRpcRequestPayload,
   buildRpcResponsePayload,
   decodeEasyTierRpcPayload,
+  encodeDirectConnectorGetIpListResponse,
   encodeGetGlobalPeerMapRequest,
   encodeGetGlobalPeerMapResponse,
   encodeReportPeersResponse,
   encodeSyncRouteInfoRequest,
   encodeSyncRouteInfoResponse,
+  encodeVoidResponse,
   natTypeName,
   observeHandshake,
   observeRpc,
@@ -21,8 +23,10 @@ import {
   type PeerInfoForGlobalMap,
   type ReportPeersRequest,
   type RouteConnBitmap,
+  type RouteConnPeerList,
   type RoutePeerInfo,
   type SyncRouteInfoRequest,
+  type SyncRouteInfoResponse,
 } from '../easytier/rpc';
 import { encodeTcpTunnelFrame, parseTcpPeerUri, TcpTunnelFrameDecoder, type TcpPeerAddress } from '../easytier/tcp-frame';
 import type { PeerSnapshot, RelayEvent, RoomSnapshot, RoutePeerSnapshot, TopologyEdge, TopologySnapshot, TopologySummary, TrafficSnapshot } from '../observer/types';
@@ -45,6 +49,7 @@ type Session = PeerSnapshot & {
   lastPingSent: number;
   lastPongReceived: number;
   ospfDescriptor?: DecodedEasyTierRpc['descriptor'];
+  ospfRouteSession?: OspfRouteSessionState;
   outboundPeerUri?: string;
   outboundHandshakeSent?: boolean;
 };
@@ -72,6 +77,24 @@ interface PersistedControlState {
   rawRoutePeerInfos: RoutePeerInfo[];
   connBitmapEdges: TopologyEdge[];
   peerCenter: PersistedPeerCenterEntry[];
+}
+
+export interface PendingRouteSync {
+  peerInfos: RoutePeerInfo[];
+  connBitmap?: RouteConnBitmap;
+  connPeerList?: RouteConnPeerList;
+}
+
+export interface OspfRouteSessionState {
+  mySessionId: bigint;
+  remoteSessionId?: bigint;
+  weAreInitiator: boolean;
+  remoteIsInitiator: boolean;
+  needSyncInitiatorInfo: boolean;
+  dstSavedPeerInfoVersions: Map<number, number>;
+  dstSavedConnInfoVersions: Map<number, number>;
+  pendingRouteSyncs: Map<string, PendingRouteSync>;
+  lastSyncSuccessAt?: number;
 }
 
 const DIRECTORY_SYNC_MIN_MS = 5_000;
@@ -285,7 +308,7 @@ export class RelayRoom implements DurableObject {
 
     session.keys = deriveKeys(networkConfig.secret);
     session.handshakeAccepted = true;
-    session.serverSessionId = session.serverSessionId ?? randomU64();
+    ensureOspfRouteSession(session);
     this.sendFrame(session, clientReq.myPeerId, EasyTierPacketType.HandShake, encodeHandshake(response));
     this.addEvent(session.roomId, 'handshake_seen', 'handshake accepted', session);
     this.queueDirectorySync(session.roomId, true);
@@ -336,7 +359,7 @@ export class RelayRoom implements DurableObject {
     this.bindPeer(session, remotePeerId);
     session.keys = deriveKeys(networkConfig.secret);
     session.handshakeAccepted = true;
-    session.serverSessionId = session.serverSessionId ?? randomU64();
+    ensureOspfRouteSession(session);
     this.addEvent(session.roomId, 'handshake_seen', 'outbound tcp handshake accepted', session);
     this.queueDirectorySync(session.roomId, true);
     this.state.waitUntil(this.bootstrapControlPlane(session, remotePeerId).catch(() => {
@@ -373,7 +396,17 @@ export class RelayRoom implements DurableObject {
     let routeChanged = false;
     if (decoded.syncRouteInfo) {
       session.ospfDescriptor = decoded.descriptor ?? session.ospfDescriptor;
+      if (targetIsEdge) updateOspfRouteSessionFromRequest(ensureOspfRouteSession(session), decoded.syncRouteInfo, header.fromPeerId);
       routeChanged = this.applySyncRouteInfo(session, decoded.syncRouteInfo);
+    }
+    if (targetIsEdge && decoded.syncRouteResponse) {
+      const routeSession = ensureOspfRouteSession(session);
+      const pending = decoded.packet.transactionId === undefined
+        ? undefined
+        : routeSession.pendingRouteSyncs.get(decoded.packet.transactionId.toString());
+      if (decoded.packet.transactionId !== undefined) routeSession.pendingRouteSyncs.delete(decoded.packet.transactionId.toString());
+      const acked = applyOspfRouteSessionResponse(routeSession, decoded.syncRouteResponse, pending, header.fromPeerId);
+      if (acked) this.addEvent(session.roomId, 'rpc_seen', `route sync ack accepted from peer ${header.fromPeerId}`, session);
     }
     if (decoded.reportPeers) this.applyPeerCenterReport(session, decoded.reportPeers);
     if (decoded.globalPeerMap) this.applyPeerCenterGlobalMap(session, decoded.globalPeerMap);
@@ -381,11 +414,10 @@ export class RelayRoom implements DurableObject {
 
     const shouldRespond = header.packetType === EasyTierPacketType.RpcReq && targetIsEdge;
     if (shouldRespond && decoded.service === 'OspfRouteRpc.SyncRouteInfo' && decoded.syncRouteInfo) {
-      const sessionId = session.serverSessionId ?? randomU64();
-      session.serverSessionId = sessionId;
-      const response = encodeSyncRouteInfoResponse({ isInitiator: !Boolean(decoded.syncRouteInfo.isInitiator), sessionId });
+      const routeSession = ensureOspfRouteSession(session);
+      const response = encodeSyncRouteInfoResponse({ isInitiator: routeSession.weAreInitiator, sessionId: routeSession.mySessionId });
       await this.sendRpcResponse(session, header.fromPeerId, decoded, response);
-      await this.pushRouteUpdateTo(session, header.fromPeerId, decoded.descriptor, routeChanged);
+      await this.pushRouteUpdateTo(session, header.fromPeerId, decoded.descriptor, routeChanged || routeSession.needSyncInitiatorInfo);
       if (routeChanged) await this.broadcastRouteUpdates(session, decoded.descriptor);
       return true;
     }
@@ -403,6 +435,28 @@ export class RelayRoom implements DurableObject {
         ? encodeGetGlobalPeerMapResponse({})
         : encodeGetGlobalPeerMapResponse({ globalPeerMap, digest });
       await this.sendRpcResponse(session, header.fromPeerId, decoded, response);
+      return true;
+    }
+
+    if (shouldRespond && decoded.service === 'DirectConnectorRpc.GetIpList') {
+      await this.sendRpcResponse(session, header.fromPeerId, decoded, encodeDirectConnectorGetIpListResponse());
+      return true;
+    }
+
+    if (shouldRespond && decoded.service === 'DirectConnectorRpc.SendUdpHolePunchPacket') {
+      await this.sendRpcResponse(session, header.fromPeerId, decoded, encodeVoidResponse());
+      return true;
+    }
+
+    if (shouldRespond && (
+      decoded.service === 'UdpHolePunchRpc.SelectPunchListener'
+      || decoded.service === 'UdpHolePunchRpc.SendPunchPacketCone'
+      || decoded.service === 'UdpHolePunchRpc.SendPunchPacketHardSym'
+      || decoded.service === 'UdpHolePunchRpc.SendPunchPacketEasySym'
+      || decoded.service === 'UdpHolePunchRpc.SendPunchPacketBothEasySym'
+      || decoded.service === 'TcpHolePunchRpc.ExchangeMappedAddr'
+    )) {
+      await this.sendRpcResponse(session, header.fromPeerId, decoded, encodeVoidResponse());
       return true;
     }
 
@@ -435,12 +489,14 @@ export class RelayRoom implements DurableObject {
     this.sendFrame(session, toPeerId, EasyTierPacketType.RpcResp, payload, flags, declaredLen);
   }
 
-  private async sendRpcRequest(session: Session, toPeerId: number, descriptor: DecodedEasyTierRpc['descriptor'], requestBody: Uint8Array): Promise<void> {
+  private async sendRpcRequest(session: Session, toPeerId: number, descriptor: DecodedEasyTierRpc['descriptor'], requestBody: Uint8Array): Promise<bigint> {
+    const transactionId = randomU64();
+    const domainName = session.networkName ?? this.expectedNetworkName(session.roomId);
     let payload = buildRpcRequestPayload({
       fromPeer: EDGE_PEER_ID,
       toPeer: toPeerId,
-      transactionId: randomU64(),
-      descriptor: descriptor ?? normalizeOspfDescriptor(session.ospfDescriptor),
+      transactionId,
+      descriptor: descriptor ?? normalizeOspfDescriptor(session.ospfDescriptor, domainName),
       requestBody,
       timeoutMs: 5_000,
     });
@@ -451,12 +507,13 @@ export class RelayRoom implements DurableObject {
       flags = 1;
     }
     this.sendFrame(session, toPeerId, EasyTierPacketType.RpcReq, payload, flags, declaredLen);
+    return transactionId;
   }
 
   private async bootstrapControlPlane(session: Session, toPeerId: number): Promise<void> {
     if (!session.handshakeAccepted || !session.keys || !toPeerId) return;
     await this.pushRouteUpdateTo(session, toPeerId, undefined, true);
-    await this.sendRpcRequest(session, toPeerId, peerCenterDescriptor(2), encodeGetGlobalPeerMapRequest(0n));
+    await this.sendRpcRequest(session, toPeerId, peerCenterDescriptor(2, session.networkName ?? this.expectedNetworkName(session.roomId)), encodeGetGlobalPeerMapRequest(0n));
     this.addEvent(session.roomId, 'rpc_seen', `peer center global map requested from peer ${toPeerId}`, session);
   }
 
@@ -500,8 +557,8 @@ export class RelayRoom implements DurableObject {
       if (directSession) applyRouteFields(directSession, snapshot);
       if (session.peerId === info.peerId) applyRouteFields(session, snapshot);
     }
-    if (req.connBitmap) {
-      const nextEdges = edgesFromConnBitmap(req.connBitmap);
+    if (req.connBitmap || req.connPeerList) {
+      const nextEdges = req.connPeerList ? edgesFromConnPeerList(req.connPeerList) : edgesFromConnBitmap(req.connBitmap!);
       if (topologyEdgeSignature(nextEdges) !== topologyEdgeSignature(this.connBitmapEdges)) changed = true;
       this.connBitmapEdges = nextEdges;
     }
@@ -515,9 +572,16 @@ export class RelayRoom implements DurableObject {
   private async pushRouteUpdateTo(session: Session, toPeerId: number, descriptor: DecodedEasyTierRpc['descriptor'], force = false): Promise<void> {
     const now = Date.now();
     if (!force && session.lastRoutePushAt && now - session.lastRoutePushAt < ROUTE_PUSH_MIN_MS) return;
-    const request = this.buildSyncRouteInfoRequest(session, toPeerId);
-    if (request.peerInfos.length === 0 && !request.connBitmap) return;
-    await this.sendRpcRequest(session, toPeerId, descriptor, encodeSyncRouteInfoRequest(request));
+    const routeSession = ensureOspfRouteSession(session);
+    const request = this.buildSyncRouteInfoRequest(session, toPeerId, force);
+    const hasConnInfo = Boolean(request.connBitmap || request.connPeerList);
+    if (request.peerInfos.length === 0 && !hasConnInfo && !routeSession.needSyncInitiatorInfo) return;
+    const transactionId = await this.sendRpcRequest(session, toPeerId, descriptor, encodeSyncRouteInfoRequest(request));
+    routeSession.pendingRouteSyncs.set(transactionId.toString(), {
+      peerInfos: request.peerInfos.map(cloneRoutePeerInfo),
+      connBitmap: request.connBitmap,
+      connPeerList: request.connPeerList,
+    });
     session.lastRoutePushAt = now;
     this.addEvent(session.roomId, 'rpc_seen', `route update pushed to peer ${toPeerId}`, session);
   }
@@ -531,8 +595,9 @@ export class RelayRoom implements DurableObject {
     await Promise.all(updates);
   }
 
-  private buildSyncRouteInfoRequest(session: Session, targetPeerId: number): SyncRouteInfoRequest {
-    const peerInfos = this.routePeerInfosForUpdate();
+  private buildSyncRouteInfoRequest(session: Session, targetPeerId: number, force = false): SyncRouteInfoRequest {
+    const routeSession = ensureOspfRouteSession(session);
+    const peerInfos = selectRoutePeerInfosForSync(routeSession, this.routePeerInfosForUpdate(), targetPeerId, force);
     const peerIds = buildRouteUpdatePeerIds(
       targetPeerId,
       this.rawRoutePeerInfos.keys(),
@@ -541,8 +606,8 @@ export class RelayRoom implements DurableObject {
     );
     return {
       myPeerId: EDGE_PEER_ID,
-      mySessionId: session.serverSessionId,
-      isInitiator: false,
+      mySessionId: routeSession.mySessionId,
+      isInitiator: routeSession.weAreInitiator,
       peerInfos,
       connBitmap: peerIds.length > 0 ? buildRouteConnBitmapForUpdate(peerIds, this.routeVersion, this.connBitmapEdges, new Set(this.peers.keys())) : undefined,
     };
@@ -696,7 +761,14 @@ export class RelayRoom implements DurableObject {
 
   private async ensureConfiguredOutboundTcp(roomId: string): Promise<void> {
     const peers = resolveOutboundTcpPeers(this.env, roomId);
-    if (peers.length === 0) return;
+    if (peers.length === 0) {
+      for (const session of [...this.sessions.values()]) {
+        if (session.roomId !== roomId || session.transportKind !== 'tcp-outbound') continue;
+        this.closeSessionTransport(session, 1000, 'outbound tcp disabled for room');
+        this.disconnect(session);
+      }
+      return;
+    }
     await Promise.all(peers.map((peer) => this.connectOutboundTcp(roomId, peer)));
     await this.ensureMaintenanceAlarm();
   }
@@ -897,6 +969,7 @@ export class RelayRoom implements DurableObject {
       lastPingSent: _lastPingSent,
       lastPongReceived: _lastPongReceived,
       ospfDescriptor: _ospfDescriptor,
+      ospfRouteSession: _ospfRouteSession,
       outboundPeerUri: _outboundPeerUri,
       outboundHandshakeSent: _outboundHandshakeSent,
       ...peer
@@ -1126,6 +1199,17 @@ export class RelayRoom implements DurableObject {
         this.sendFrame(session, session.peerId, EasyTierPacketType.Ping, new TextEncoder().encode('ping'));
         session.lastPingSent = now;
       }
+
+      if (session.peerId && session.handshakeAccepted) {
+        const routeSession = ensureOspfRouteSession(session);
+        const shouldSyncAsInitiator = routeSession.weAreInitiator && (!session.lastRoutePushAt || now - session.lastRoutePushAt >= ROUTE_PUSH_MIN_MS);
+        const shouldSyncInitiatorFlag = routeSession.needSyncInitiatorInfo && (!session.lastRoutePushAt || now - session.lastRoutePushAt >= 1_000);
+        if (shouldSyncAsInitiator || shouldSyncInitiatorFlag) {
+          this.state.waitUntil(this.pushRouteUpdateTo(session, session.peerId, session.ospfDescriptor, shouldSyncInitiatorFlag).catch(() => {
+            this.addEvent(session.roomId, 'decode_error', 'periodic route sync failed', session);
+          }));
+        }
+      }
     }
   }
 
@@ -1266,6 +1350,115 @@ function randomU64(): bigint {
   return (BigInt(words[0]) << 32n) | BigInt(words[1]);
 }
 
+function ensureOspfRouteSession(session: Session): OspfRouteSessionState {
+  if (!session.ospfRouteSession) {
+    const mySessionId = session.serverSessionId ?? randomU64();
+    session.serverSessionId = mySessionId;
+    session.ospfRouteSession = createOspfRouteSessionState(mySessionId);
+  }
+  return session.ospfRouteSession;
+}
+
+export function createOspfRouteSessionState(mySessionId: bigint): OspfRouteSessionState {
+  return {
+    mySessionId,
+    weAreInitiator: true,
+    remoteIsInitiator: false,
+    needSyncInitiatorInfo: true,
+    dstSavedPeerInfoVersions: new Map(),
+    dstSavedConnInfoVersions: new Map(),
+    pendingRouteSyncs: new Map(),
+  };
+}
+
+export function updateOspfRouteSessionFromRequest(state: OspfRouteSessionState, request: SyncRouteInfoRequest, remotePeerId: number): void {
+  if (request.mySessionId !== undefined) updateRemoteOspfSessionId(state, request.mySessionId);
+  const remoteIsInitiator = Boolean(request.isInitiator);
+  state.remoteIsInitiator = remoteIsInitiator;
+  if (remoteIsInitiator && state.weAreInitiator) {
+    state.weAreInitiator = false;
+    state.needSyncInitiatorInfo = true;
+  } else if (!remoteIsInitiator && !state.weAreInitiator) {
+    state.weAreInitiator = true;
+    state.needSyncInitiatorInfo = true;
+  }
+  markRemoteSavedRouteInfo(state, request.peerInfos, remotePeerId);
+  markRemoteSavedConnInfo(state, request.connBitmap, request.connPeerList, remotePeerId);
+}
+
+export function applyOspfRouteSessionResponse(
+  state: OspfRouteSessionState,
+  response: SyncRouteInfoResponse,
+  pending: PendingRouteSync | undefined,
+  remotePeerId: number,
+  now = Date.now(),
+): boolean {
+  if (response.error !== undefined) {
+    state.needSyncInitiatorInfo = true;
+    return false;
+  }
+  if (response.isInitiator !== undefined) state.remoteIsInitiator = response.isInitiator;
+  if (response.sessionId !== undefined) updateRemoteOspfSessionId(state, response.sessionId);
+  if (pending) {
+    markRemoteSavedRouteInfo(state, pending.peerInfos, remotePeerId);
+    markRemoteSavedConnInfo(state, pending.connBitmap, pending.connPeerList, remotePeerId);
+  }
+  state.needSyncInitiatorInfo = false;
+  state.lastSyncSuccessAt = now;
+  return true;
+}
+
+export function selectRoutePeerInfosForSync(
+  state: OspfRouteSessionState,
+  infos: RoutePeerInfo[],
+  remotePeerId: number,
+  force: boolean,
+): RoutePeerInfo[] {
+  return infos.filter((info) => {
+    if (!info.peerId || info.peerId === remotePeerId) return false;
+    const version = info.version ?? 0;
+    if (version === 0) return false;
+    if (force) return true;
+    return (state.dstSavedPeerInfoVersions.get(info.peerId) ?? 0) < version;
+  });
+}
+
+function updateRemoteOspfSessionId(state: OspfRouteSessionState, sessionId: bigint): void {
+  if (state.remoteSessionId === sessionId) return;
+  state.remoteSessionId = sessionId;
+  state.dstSavedPeerInfoVersions.clear();
+  state.dstSavedConnInfoVersions.clear();
+  state.pendingRouteSyncs.clear();
+  state.lastSyncSuccessAt = undefined;
+}
+
+function markRemoteSavedRouteInfo(state: OspfRouteSessionState, infos: RoutePeerInfo[], remotePeerId: number): void {
+  for (const info of infos) {
+    const version = info.version ?? 0;
+    if (!info.peerId || info.peerId === remotePeerId || version === 0) continue;
+    const previous = state.dstSavedPeerInfoVersions.get(info.peerId) ?? 0;
+    if (version > previous) state.dstSavedPeerInfoVersions.set(info.peerId, version);
+  }
+}
+
+function markRemoteSavedConnInfo(
+  state: OspfRouteSessionState,
+  connBitmap: RouteConnBitmap | undefined,
+  connPeerList: RouteConnPeerList | undefined,
+  remotePeerId: number,
+): void {
+  for (const item of connBitmap?.peerIds ?? []) markRemoteSavedConnPeerVersion(state, item.peerId, item.version, remotePeerId);
+  for (const item of connPeerList?.peerConnInfos ?? []) {
+    if (item.peerId) markRemoteSavedConnPeerVersion(state, item.peerId.peerId, item.peerId.version, remotePeerId);
+  }
+}
+
+function markRemoteSavedConnPeerVersion(state: OspfRouteSessionState, peerId: number, version: number, remotePeerId: number): void {
+  if (!peerId || peerId === remotePeerId || version === 0) return;
+  const previous = state.dstSavedConnInfoVersions.get(peerId) ?? 0;
+  if (version > previous) state.dstSavedConnInfoVersions.set(peerId, version);
+}
+
 function routePeerSnapshot(info: RoutePeerInfo, lastSeen: string, sourcePeerId?: number): RoutePeerSnapshot {
   return {
     peerId: info.peerId,
@@ -1304,19 +1497,19 @@ function formatIpv4Cidr(info: RoutePeerInfo): string | undefined {
   return info.networkLength ? `${info.ipv4}/${info.networkLength}` : info.ipv4;
 }
 
-function normalizeOspfDescriptor(descriptor: DecodedEasyTierRpc['descriptor']): NonNullable<DecodedEasyTierRpc['descriptor']> {
+function normalizeOspfDescriptor(descriptor: DecodedEasyTierRpc['descriptor'], domainName: string): NonNullable<DecodedEasyTierRpc['descriptor']> {
   return {
-    domainName: descriptor?.domainName ?? 'public_server',
-    protoName: descriptor?.protoName ?? 'peer_rpc',
+    domainName: descriptor?.domainName ?? domainName,
+    protoName: descriptor?.protoName ?? 'OspfRouteRpc',
     serviceName: descriptor?.serviceName ?? 'OspfRouteRpc',
     methodIndex: descriptor?.methodIndex ?? 1,
   };
 }
 
-function peerCenterDescriptor(methodIndex: number): NonNullable<DecodedEasyTierRpc['descriptor']> {
+function peerCenterDescriptor(methodIndex: number, domainName: string): NonNullable<DecodedEasyTierRpc['descriptor']> {
   return {
-    domainName: 'public_server',
-    protoName: 'peer_rpc',
+    domainName,
+    protoName: 'PeerCenterRpc',
     serviceName: 'PeerCenterRpc',
     methodIndex,
   };
@@ -1416,6 +1609,19 @@ function edgesFromConnBitmap(conn: RouteConnBitmap): TopologyEdge[] {
     }
   }
   return edges;
+}
+
+function edgesFromConnPeerList(conn: RouteConnPeerList): TopologyEdge[] {
+  const edges: TopologyEdge[] = [];
+  for (const item of conn.peerConnInfos) {
+    const fromPeerId = item.peerId?.peerId;
+    if (!fromPeerId) continue;
+    for (const toPeerId of item.connectedPeerIds) {
+      if (!toPeerId || fromPeerId === toPeerId) continue;
+      edges.push({ fromPeerId, toPeerId, source: 'conn_bitmap' });
+    }
+  }
+  return edges.sort(compareTopologyEdges);
 }
 
 function edgesFromPeerCenter(peerCenter: Map<number, { directPeers: Map<number, DirectConnectedPeerInfo> }>): TopologyEdge[] {
@@ -1575,6 +1781,7 @@ export function resolveOutboundTcpPeers(
   env: Pick<Env, 'EASYTIER_PUBLIC_PEER_TCP' | 'EASYTIER_OUTBOUND_TCP_PEERS'>,
   roomId: string,
 ): TcpPeerAddress[] {
+  if (roomId === 'null' || roomId === 'undefined') return [];
   const candidates = [
     ...parseOutboundTcpPeerConfig(env.EASYTIER_OUTBOUND_TCP_PEERS, roomId),
     ...splitPeerList(env.EASYTIER_PUBLIC_PEER_TCP),

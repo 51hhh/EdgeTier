@@ -6,6 +6,22 @@ export interface HandshakeObservation {
 }
 
 export interface RpcObservation {
-  service: 'OspfRouteRpc.SyncRouteInfo' | 'PeerCenterRpc' | 'PeerCenterRpc.ReportPeers' | 'PeerCenterRpc.GetGlobalPeerMap' | 'unknown';
+  service:
+    | 'OspfRouteRpc.SyncRouteInfo'
+    | 'PeerCenterRpc'
+    | 'PeerCenterRpc.ReportPeers'
+    | 'PeerCenterRpc.GetGlobalPeerMap'
+    | 'DirectConnectorRpc'
+    | 'DirectConnectorRpc.GetIpList'
+    | 'DirectConnectorRpc.SendUdpHolePunchPacket'
+    | 'UdpHolePunchRpc'
+    | 'UdpHolePunchRpc.SelectPunchListener'
+    | 'UdpHolePunchRpc.SendPunchPacketCone'
+    | 'UdpHolePunchRpc.SendPunchPacketHardSym'
+    | 'UdpHolePunchRpc.SendPunchPacketEasySym'
+    | 'UdpHolePunchRpc.SendPunchPacketBothEasySym'
+    | 'TcpHolePunchRpc'
+    | 'TcpHolePunchRpc.ExchangeMappedAddr'
+    | 'unknown';
   message: string;
 }

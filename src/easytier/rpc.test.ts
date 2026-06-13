@@ -185,6 +185,7 @@ describe('EasyTier RPC codec', () => {
     expect(decoded.service).toBe('OspfRouteRpc.SyncRouteInfo');
     expect(decoded.message).toBe('route sync RPC response decoded');
     expect(decoded.syncRouteInfo).toBeUndefined();
+    expect(decoded.syncRouteResponse).toEqual({ isInitiator: false, sessionId: 10n });
   });
 
   it('maps known and unknown NAT enum values', () => {
@@ -313,5 +314,75 @@ describe('EasyTier RPC codec', () => {
       networkLength: 24,
     });
     expect(decoded.syncRouteInfo?.connBitmap?.peerIds.map((item) => item.peerId)).toEqual([EDGE_PEER_ID, 42]);
+  });
+
+  it('decodes SyncRouteInfo RouteConnPeerList oneof field 7', () => {
+    const requestBody = encodeSyncRouteInfoRequest({
+      myPeerId: 42,
+      mySessionId: 111n,
+      isInitiator: true,
+      peerInfos: [],
+      connPeerList: {
+        peerConnInfos: [
+          { peerId: { peerId: 42, version: 8 }, connectedPeerIds: [100, 200] },
+          { peerId: { peerId: 100, version: 9 }, connectedPeerIds: [42] },
+        ],
+      },
+    });
+
+    const decoded = decodeEasyTierRpcPayload(buildRpcRequestPayload({
+      fromPeer: 42,
+      toPeer: EDGE_PEER_ID,
+      transactionId: 222n,
+      descriptor: { protoName: 'peer_rpc', serviceName: 'OspfRouteRpc', methodIndex: 1 },
+      requestBody,
+    }));
+
+    expect(decoded.service).toBe('OspfRouteRpc.SyncRouteInfo');
+    expect(decoded.syncRouteInfo?.connBitmap).toBeUndefined();
+    expect(decoded.syncRouteInfo?.connPeerList?.peerConnInfos).toEqual([
+      { peerId: { peerId: 42, version: 8 }, connectedPeerIds: [100, 200] },
+      { peerId: { peerId: 100, version: 9 }, connectedPeerIds: [42] },
+    ]);
+  });
+
+  it('decodes DirectConnector RPC requests so Worker can no-op unsupported UDP paths', () => {
+    const getIpList = decodeEasyTierRpcPayload(buildRpcRequestPayload({
+      fromPeer: 42,
+      toPeer: EDGE_PEER_ID,
+      transactionId: 333n,
+      descriptor: { protoName: 'peer_rpc', serviceName: 'DirectConnectorRpc', methodIndex: 1 },
+      requestBody: new Uint8Array(0),
+    }));
+    const holePunch = decodeEasyTierRpcPayload(buildRpcRequestPayload({
+      fromPeer: 42,
+      toPeer: EDGE_PEER_ID,
+      transactionId: 334n,
+      descriptor: { protoName: 'peer_rpc', serviceName: 'DirectConnectorRpc', methodIndex: 2 },
+      requestBody: new Uint8Array(0),
+    }));
+
+    expect(getIpList.service).toBe('DirectConnectorRpc.GetIpList');
+    expect(holePunch.service).toBe('DirectConnectorRpc.SendUdpHolePunchPacket');
+  });
+
+  it('decodes UDP/TCP hole-punch RPC requests as explicit no-op services', () => {
+    const udp = decodeEasyTierRpcPayload(buildRpcRequestPayload({
+      fromPeer: 42,
+      toPeer: EDGE_PEER_ID,
+      transactionId: 335n,
+      descriptor: { protoName: 'peer_rpc', serviceName: 'UdpHolePunchRpc', methodIndex: 3 },
+      requestBody: new Uint8Array(0),
+    }));
+    const tcp = decodeEasyTierRpcPayload(buildRpcRequestPayload({
+      fromPeer: 42,
+      toPeer: EDGE_PEER_ID,
+      transactionId: 336n,
+      descriptor: { protoName: 'peer_rpc', serviceName: 'TcpHolePunchRpc', methodIndex: 1 },
+      requestBody: new Uint8Array(0),
+    }));
+
+    expect(udp.service).toBe('UdpHolePunchRpc.SendPunchPacketHardSym');
+    expect(tcp.service).toBe('TcpHolePunchRpc.ExchangeMappedAddr');
   });
 });
