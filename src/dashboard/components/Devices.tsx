@@ -3,6 +3,7 @@ import { Badge, Empty, LayerCard, Table, Text } from '@cloudflare/kumo';
 import type { PeerSnapshot } from '../../observer/types';
 import { formatByteRate, formatBytes, formatPercent } from '../format';
 import type { Translator } from '../i18n';
+import { peerDisplayName, peerFullLabel, shortPeerId } from '../peer-display';
 
 interface PeerDetailProps {
   peer: PeerSnapshot;
@@ -14,10 +15,6 @@ function Row({ label, value, muted }: { label: string; value: React.ReactNode; m
     <Text as="span" variant="secondary" size="sm">{label}</Text>
     <Text as="span" variant={muted ? 'secondary' : 'body'}>{value}</Text>
   </div>;
-}
-
-function peerIdLabel(peer: PeerSnapshot, t: Translator): string | number {
-  return peer.peerId ?? t('common.unknownPeer');
 }
 
 function transportLabel(peer: PeerSnapshot, t: Translator): string {
@@ -45,7 +42,7 @@ function statusVariant(peer: PeerSnapshot): 'primary' | 'secondary' | 'outline' 
 export function PeerDetail({ peer, t }: PeerDetailProps) {
   return <LayerCard>
     <LayerCard.Secondary>
-      {t('devices.device', { peer: String(peerIdLabel(peer, t)) })} <Badge variant={statusVariant(peer)}>{statusLabel(peer, t)}</Badge>
+      {t('devices.device', { peer: peerDisplayName(peer, t('common.unknownPeer')) })} <Badge variant={statusVariant(peer)}>{statusLabel(peer, t)}</Badge>
     </LayerCard.Secondary>
     <LayerCard.Primary>
       <div className="detail-grid">
@@ -105,7 +102,10 @@ export function PeerTable({ peers, selectedSession, onSelect, t }: PeerTableProp
         <Table.Row key={peer.sessionId} variant={peer.sessionId === selectedSession ? 'selected' : 'default'}>
           <Table.Cell>
             <button type="button" className="row-button" onClick={() => onSelect(peer.sessionId)} aria-pressed={peer.sessionId === selectedSession}>
-              <Badge variant="outline">{peerIdLabel(peer, t)}</Badge>
+              <span className="peer-identity" title={peerFullLabel(peer, t('common.unknownPeer'))}>
+                <Badge variant="outline">{shortPeerId(peer.peerId, t('common.unknownPeer'))}</Badge>
+                <span className="peer-hostname">{peer.hostname ?? t('common.routeDataPending')}</span>
+              </span>
             </button>
           </Table.Cell>
           <Table.Cell>{transportLabel(peer, t)}</Table.Cell>

@@ -47,6 +47,7 @@ import { Badge, Button, Empty, Input, LayerCard, Table, Text, cn } from '@cloudf
 - Components must tolerate empty arrays and missing optional fields.
 - Manual room lookup is allowed, but it only fetches observer state; it must not create or configure EasyTier nodes.
 - Unknown peer IDs display as `unknown`.
+- Peer identifiers in dense tables, topology graphs, and matrix headers should use a short badge plus a hostname/subtitle when available, with the full peer id retained in `title`/detail text.
 - Missing last activity displays as `none`.
 - Status text should be short and badge-friendly.
 - Do not display full network secret digests.
@@ -65,6 +66,8 @@ import { Badge, Button, Empty, Input, LayerCard, Table, Text, cn } from '@cloudf
 | `room.peers.length === 0` | Render `Empty` for no peers |
 | `room.recentEvents.length === 0` | Render `Empty` for no events |
 | `peer.peerId` missing | Render `unknown` |
+| `peer.hostname` present | Render it as the primary human label or a subtitle near the shortened peer id |
+| Long numeric peer id | Render a shortened stable badge and keep the full id available in hover/detail text |
 | API error | Render visible `role="alert"` error without clearing previous successful data |
 | Lookup room name invalid | Render validation error and do not change selection |
 | Event type is `decode_error` or `limit_exceeded` | Use destructive badge variant |
@@ -75,6 +78,7 @@ import { Badge, Button, Empty, Input, LayerCard, Table, Text, cn } from '@cloudf
 
 - Good: use `<Table>` for Rooms, Peers, and Events with safe fallback text.
 - Good: use `<Badge>` for room id, active/stale state, peer status, and event type.
+- Good: use the shared peer display helper so Devices, Topology, route paths, and bitmap matrices all show peer ids/hostnames consistently.
 - Good: use `<Button type="button">` inside table cells for room selection so keyboard focus and activation work.
 - Good: use `<LayerCard>` for dashboard panels and metrics.
 - Good: use `<Empty>` for no rooms/no peers/no events states.
@@ -86,6 +90,7 @@ import { Badge, Button, Empty, Input, LayerCard, Table, Text, cn } from '@cloudf
 ### 6. Tests Required
 
 - Test extracted presentation helpers such as `formatBytes` and `eventBadgeVariant`.
+- Test extracted peer display helpers such as long-id shortening and hostname/full-id labels.
 - Future component test: empty room snapshot renders without throwing.
 - Future component test: peer without `peerId` renders `unknown`.
 - Future accessibility check if adding dialogs, command palette, or forms.

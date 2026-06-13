@@ -40,6 +40,13 @@ body {
   gap: 8px;
 }
 
+.hero-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
@@ -136,6 +143,30 @@ body {
   padding: 6px 0;
 }
 
+.traffic-chart-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.chart-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+}
+
+.chart-stat {
+  min-height: 58px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  border: 1px solid var(--color-kumo-hairline);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--color-kumo-recessed);
+}
+
 .traffic-chart,
 .topology-graph {
   width: 100%;
@@ -162,6 +193,23 @@ body {
   stroke-width: 1;
 }
 
+.chart-axis-line {
+  stroke: var(--color-kumo-subtle);
+  stroke-width: 1;
+  opacity: 0.55;
+  vector-effect: non-scaling-stroke;
+}
+
+.chart-axis-label {
+  fill: var(--color-kumo-subtle);
+  font-size: 11px;
+  text-anchor: end;
+  paint-order: stroke;
+  stroke: var(--color-kumo-base);
+  stroke-width: 4px;
+  stroke-linejoin: round;
+}
+
 .traffic-line {
   fill: none;
   stroke-width: 3;
@@ -174,6 +222,36 @@ body {
 
 .traffic-line.tx {
   stroke: var(--color-kumo-success, #11845b);
+}
+
+.traffic-area.rx {
+  fill: url("#traffic-rx-fill");
+}
+
+.traffic-area.tx {
+  fill: url("#traffic-tx-fill");
+}
+
+.traffic-endpoint {
+  stroke: var(--color-kumo-base);
+  stroke-width: 2;
+}
+
+.traffic-endpoint.rx {
+  fill: var(--color-kumo-brand, #2563eb);
+}
+
+.traffic-endpoint.tx {
+  fill: var(--color-kumo-success, #11845b);
+}
+
+.chart-time-axis {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 10px 8px 44px;
+  color: var(--color-kumo-subtle);
+  font-size: 0.75rem;
 }
 
 .chart-legend {
@@ -206,6 +284,14 @@ body {
   background: var(--color-kumo-success, #11845b);
 }
 
+.graph-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
 .graph-edge {
   stroke-width: 2;
   opacity: 0.75;
@@ -222,7 +308,8 @@ body {
 }
 
 .graph-edge-label,
-.graph-node-label {
+.graph-node-label,
+.graph-node-host-label {
   fill: var(--color-kumo-default);
   font-size: 12px;
   text-anchor: middle;
@@ -230,6 +317,11 @@ body {
   stroke: var(--color-kumo-base);
   stroke-width: 4px;
   stroke-linejoin: round;
+}
+
+.graph-node-host-label {
+  fill: var(--color-kumo-subtle);
+  font-size: 11px;
 }
 
 .graph-node {
@@ -248,6 +340,22 @@ body {
 
 .matrix-scroll table {
   min-width: 640px;
+}
+
+.matrix-peer-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 82px;
+}
+
+.matrix-peer-head span:last-child {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-kumo-subtle);
+  font-size: 0.75rem;
 }
 
 .matrix-on {
@@ -272,6 +380,37 @@ body {
   background: transparent;
   color: inherit;
   cursor: pointer;
+}
+
+.peer-identity {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  min-width: 88px;
+  max-width: 180px;
+}
+
+.peer-hostname {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-kumo-subtle);
+  font-size: 0.75rem;
+  line-height: 1.1;
+}
+
+.route-path-label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  max-width: 360px;
+}
+
+.route-path-arrow {
+  color: var(--color-kumo-subtle);
 }
 
 code {

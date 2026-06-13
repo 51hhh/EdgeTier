@@ -168,7 +168,11 @@ export function App() {
         </div>
       </div>
       <Tabs variant="underline" tabs={tabs} value={tab} onValueChange={setTab} />
-      <Text as="p" variant="secondary" size="sm">{lastRefreshed ? t('app.lastRefreshed', { time: lastRefreshed }) : t('app.loading')}{selected ? ` · ${t('app.room', { room: selected })}` : ` · ${t('app.noRoom')}`}</Text>
+      <div className="hero-meta">
+        <Badge variant="outline">{lastRefreshed ? t('app.lastRefreshed', { time: lastRefreshed }) : t('app.loading')}</Badge>
+        <Badge variant={selected ? 'primary' : 'secondary'}>{selected ? t('app.room', { room: selected }) : t('app.noRoom')}</Badge>
+        <Badge variant="outline">{defaultNetworkName}</Badge>
+      </div>
     </header>
 
     {error && <section className="error-banner text-kumo-danger" role="alert">{error}. {t('app.errorSuffix')}</section>}
