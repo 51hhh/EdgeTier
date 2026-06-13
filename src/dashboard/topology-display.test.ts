@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildTopologyGraphLinks, buildTopologyGraphNodes, computeTopologyGraphLayout } from './topology-display';
+import { buildTopologyGraphLinks, buildTopologyGraphNodes, computeTopologyGraphLayout, topologyGraphPeerIds } from './topology-display';
 
 describe('dashboard topology display helpers', () => {
   it('aggregates directed topology edges into readable graph links', () => {
@@ -24,11 +24,11 @@ describe('dashboard topology display helpers', () => {
     ]);
 
     expect(buildTopologyGraphNodes([10000001, 1, 2, 3, 4], links)).toEqual([
-      { peerId: 1, degree: 4 },
-      { peerId: 3, degree: 2 },
-      { peerId: 2, degree: 1 },
-      { peerId: 10000001, degree: 1 },
-      { peerId: 4, degree: 0 },
+      { peerId: 1, degree: 4, radius: 21, collisionRadius: 63 },
+      { peerId: 3, degree: 2, radius: 19, collisionRadius: 57 },
+      { peerId: 2, degree: 1, radius: 18, collisionRadius: 54 },
+      { peerId: 10000001, degree: 1, radius: 18, collisionRadius: 54 },
+      { peerId: 4, degree: 0, radius: 17, collisionRadius: 51 },
     ]);
   });
 
@@ -45,10 +45,36 @@ describe('dashboard topology display helpers', () => {
     expect(second).toEqual(first);
     expect(first.map((node) => node.peerId).sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5]);
     for (const node of first) {
-      expect(node.x).toBeGreaterThanOrEqual(54);
-      expect(node.x).toBeLessThanOrEqual(706);
-      expect(node.y).toBeGreaterThanOrEqual(54);
-      expect(node.y).toBeLessThanOrEqual(306);
+      expect(node.radius).toBeGreaterThanOrEqual(17);
+      expect(node.collisionRadius).toBeGreaterThan(node.radius);
+      expect(node.x).toBeGreaterThanOrEqual(node.collisionRadius + 16);
+      expect(node.x).toBeLessThanOrEqual(760 - node.collisionRadius - 16);
+      expect(node.y).toBeGreaterThanOrEqual(node.collisionRadius + 16);
+      expect(node.y).toBeLessThanOrEqual(360 - node.collisionRadius - 16);
     }
+  });
+
+  it('uses dynamic collision radii so large labels and high degree nodes reserve more space', () => {
+    const nodes = buildTopologyGraphNodes([1, 10000001, 42], buildTopologyGraphLinks([
+      { fromPeerId: 1, toPeerId: 10000001, source: 'conn_bitmap' },
+      { fromPeerId: 1, toPeerId: 42, source: 'conn_bitmap' },
+      { fromPeerId: 42, toPeerId: 1, source: 'peer_center', latencyMs: 8 },
+    ]));
+
+    const hub = nodes.find((node) => node.peerId === 1);
+    const isolatedLabel = buildTopologyGraphNodes([10000001], []);
+
+    expect(hub?.collisionRadius).toBeGreaterThan(hub?.radius ?? 0);
+    expect(isolatedLabel[0].collisionRadius).toBeGreaterThan(isolatedLabel[0].radius);
+  });
+
+  it('keeps observed edge endpoints in the graph even when route peer details are pending', () => {
+    const links = buildTopologyGraphLinks([
+      { fromPeerId: 1, toPeerId: 2, source: 'conn_bitmap' },
+      { fromPeerId: 2, toPeerId: 3, source: 'peer_center', latencyMs: 12 },
+      { fromPeerId: 0, toPeerId: 4, source: 'conn_bitmap' },
+    ]);
+
+    expect(topologyGraphPeerIds([1], links)).toEqual([1, 2, 3]);
   });
 });

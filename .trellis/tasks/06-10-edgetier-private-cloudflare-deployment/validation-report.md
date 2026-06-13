@@ -385,3 +385,89 @@ Security notes:
 
 - The downloaded EasyTier config contains the network secret and was copied only to the remote root-owned config path.
 - Validation output and this report omit secret values, relay tokens, and unredacted peer URIs.
+
+## Kumo Chart And Overview Style Pass
+
+Deployment version validated:
+
+- `98c13967-9549-4ff1-bcc3-d44fa688ec1e`: Kumo overview metric/chart pass deployed to Cloudflare.
+
+Kumo review notes:
+
+- `https://kumo-ui.com/charts/` documents that Kumo charts are built on ECharts and require an app-level `echarts` dependency.
+- `TimeseriesChart` is the correct Kumo primitive for the dashboard traffic history.
+- `ChartLegend.LargeItem` is intended for prominent single-metric dashboard cards.
+- `ChartLegend.SmallItem` is the correct compact legend primitive next to a chart.
+- `Grid`/`GridItem` and `Meter` are better matches for overview layout and outbound TCP ratios than custom grid/stat blocks.
+
+Dashboard/UI changes:
+
+- Replaced the hand-written traffic SVG with Kumo `TimeseriesChart`.
+- Added `echarts` as a runtime dependency and imported only the required ECharts modules.
+- Lazy-loaded the traffic chart so ECharts is split into a separate `TrafficChart` chunk instead of bloating the initial dashboard chunk.
+- Replaced overview metric cards with `ChartLegend.LargeItem`.
+- Replaced outbound TCP connected/handshake text rows with Kumo `Meter`.
+- Removed obsolete traffic SVG CSS; kept only layout glue for Kumo chart sections and existing topology SVG.
+
+Local/deploy gate:
+
+- `npm run typecheck`: passed.
+- `npm test`: passed, 93 tests.
+- `npm run proto:check`: passed.
+- `npm run build`: passed; Vite chunk-size warning remains, with `TrafficChart` split into a separate lazy chunk.
+- `npx wrangler deploy`: passed.
+
+Online route checks:
+
+- `POST /api/auth/login`: `200`
+- `GET /api/health` with session cookie: `200`
+- `GET /dashboard/`: `200`
+- `GET /api/rooms/home-mesh`: `200`
+- `GET /api/rooms/home-mesh/topology`: `200`
+- Authenticated lazy chart chunk fetch: `200`.
+
+Real `home-mesh` smoke window:
+
+- `/api/rooms/home-mesh` reported `peerCount=5`, `websocketCount=0`, and 8 traffic samples.
+- `/api/rooms/home-mesh/topology` reported 5 nodes / 23 directed edges / 4 reachable routes.
+
+Security notes:
+
+- Admin credentials were read only from gitignored local env files for authenticated smoke checks.
+- Validation output records only aggregate status and topology fields.
+
+## Local Dashboard Spacing And Topology Readability Pass
+
+Scope:
+
+- Tightened the Overview metric strip spacing while keeping `LayerCard` and Kumo `ChartLegend.LargeItem`.
+- Increased the topology graph viewport and tuned the force layout using dynamic collision radii derived from node radius, label footprint, and degree.
+- Reduced edge-label clutter by prioritizing latency/hybrid/multi-directed labels and preserving full edge details in SVG titles.
+- No deployment was performed for this pass.
+
+Topology data contract:
+
+- Graph links still come only from observed topology edges.
+- No synthetic edges are added for isolated nodes.
+- No peer, including `edgetier-worker`, is fixed or pinned as the graph center.
+
+Local gate:
+
+- `npm run typecheck`: passed.
+- `npm test`: passed, 94 tests.
+- `npm run proto:check`: passed.
+- `npm run build`: passed; Vite chunk-size warning remains non-fatal.
+
+Reviewer follow-up:
+
+- The graph now includes observed edge endpoints even when their RoutePeerInfo details are still pending, so conn-bitmap/PeerCenter edges are not hidden just because a node has only partial topology metadata.
+- The fallback still does not add synthetic edges and does not pin `edgetier-worker` or any other peer as a fixed center.
+- Added a topology display helper regression test for observed edge endpoints with pending route details.
+- Graph node labels now use compact display text for long hostnames while keeping full peer labels in hover/title text.
+
+Reviewer local gate:
+
+- `npm run typecheck`: passed.
+- `npm test`: passed, 96 tests.
+- `npm run proto:check`: passed.
+- `git diff --check`: passed.

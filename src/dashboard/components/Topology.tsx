@@ -4,16 +4,16 @@ import type { ConnectionMatrixSnapshot, RoutePathSnapshot, RoutePeerSnapshot, To
 import { EDGE_PEER_ID } from '../../easytier/constants';
 import { formatPercent } from '../format';
 import type { Translator } from '../i18n';
-import { peerDisplayName, peerFullLabel, shortPeerId } from '../peer-display';
-import { buildTopologyGraphLinks, computeTopologyGraphLayout, type TopologyGraphLink, type TopologyGraphPosition } from '../topology-display';
+import { compactPeerDisplayName, peerDisplayName, peerFullLabel, shortPeerId } from '../peer-display';
+import { buildTopologyGraphLinks, computeTopologyGraphLayout, topologyGraphPeerIds, type TopologyGraphLink, type TopologyGraphPosition } from '../topology-display';
 
 interface TopologyProps {
   topology?: TopologySnapshot | null;
   t: Translator;
 }
 
-const GRAPH_WIDTH = 760;
-const GRAPH_HEIGHT = 360;
+const GRAPH_WIDTH = 920;
+const GRAPH_HEIGHT = 460;
 
 export function Topology({ topology, t }: TopologyProps) {
   const nodes = topology?.nodes ?? [];
@@ -132,12 +132,12 @@ function ConnectionGraph({ topology, nodeByPeerId, t }: { topology?: TopologySna
   const nodes = topology?.nodes ?? [];
   const edges = topology?.edges ?? [];
   const graphLinks = useMemo(() => buildTopologyGraphLinks(edges), [edges]);
-  const graphPeerIds = useMemo(() => nodes.map((node) => node.peerId), [nodes]);
+  const graphPeerIds = useMemo(() => topologyGraphPeerIds(nodes.map((node) => node.peerId), graphLinks), [nodes, graphLinks]);
   const layoutSignature = useMemo(() => graphLayoutSignature(graphPeerIds, graphLinks), [graphPeerIds, graphLinks]);
   const targetLayout = useMemo(() => computeTopologyGraphLayout(graphPeerIds, graphLinks, GRAPH_WIDTH, GRAPH_HEIGHT), [layoutSignature]);
   const animatedLayout = useAnimatedGraphLayout(targetLayout, graphLinks);
   const positions = useMemo(() => new Map(animatedLayout.map((position) => [position.peerId, position])), [animatedLayout]);
-  if (nodes.length === 0) {
+  if (graphPeerIds.length === 0) {
     return <LayerCard>
       <LayerCard.Secondary>{t('topology.connectionGraph')}</LayerCard.Secondary>
       <LayerCard.Primary><Empty title={t('topology.noGraphTitle')} description={t('topology.noGraphDescription')} /></LayerCard.Primary>
@@ -149,7 +149,7 @@ function ConnectionGraph({ topology, nodeByPeerId, t }: { topology?: TopologySna
       <div className="stack compact">
         <div className="graph-toolbar">
           <Text as="p" variant="secondary" size="sm">{t('topology.connectionGraphHelp')}</Text>
-          <Badge variant="outline">{t('topology.graphStats', { nodes: nodes.length, edges: graphLinks.length })}</Badge>
+          <Badge variant="outline">{t('topology.graphStats', { nodes: graphPeerIds.length, edges: graphLinks.length })}</Badge>
         </div>
         <div className="topology-graph" role="img" aria-label={t('topology.connectionGraph')}>
           <svg viewBox={`0 0 ${GRAPH_WIDTH} ${GRAPH_HEIGHT}`}>
@@ -157,21 +157,27 @@ function ConnectionGraph({ topology, nodeByPeerId, t }: { topology?: TopologySna
               const from = positions.get(link.fromPeerId);
               const to = positions.get(link.toPeerId);
               if (!from || !to) return null;
-              const label = graphLinkLabel(link);
+              const label = graphLinkLabel(link, graphLinks.length);
+              const labelX = Math.round((from.x + to.x) / 2);
+              const labelY = Math.round((from.y + to.y) / 2);
               return <g key={`${link.fromPeerId}-${link.toPeerId}`}>
                 <title>{graphLinkTitle(link, nodeByPeerId, t)}</title>
                 <line className={`graph-edge ${graphLinkClass(link)}`} x1={from.x} y1={from.y} x2={to.x} y2={to.y} />
-                {label && <text className="graph-edge-label" x={(from.x + to.x) / 2} y={(from.y + to.y) / 2}>{label}</text>}
+                {label && <g className="graph-edge-label-group" transform={`translate(${labelX} ${labelY})`}>
+                  <rect className="graph-edge-label-bg" x={edgeLabelBgX(label)} y={-9} width={edgeLabelBgWidth(label)} height={16} rx={4} />
+                  <text className="graph-edge-label" x={0} y={3}>{label}</text>
+                </g>}
               </g>;
             })}
-            {nodes.map((node) => {
-              const pos = positions.get(node.peerId);
+            {graphPeerIds.map((peerId) => {
+              const pos = positions.get(peerId);
               if (!pos) return null;
+              const node = peerFor(peerId, nodeByPeerId);
               return <g key={node.peerId} className="graph-node-group" transform={`translate(${pos.x} ${pos.y})`}>
                 <title>{peerFullLabel(node, t('common.unknownPeer'))}</title>
                 <circle className="graph-node" cx={0} cy={0} r={nodeRadius(pos)} />
                 <text className="graph-node-label" x={0} y={4}>{shortPeerId(node.peerId)}</text>
-                <text className="graph-node-host-label" x={0} y={nodeRadius(pos) + 16}>{peerDisplayName(node, t('common.routeDataPending'))}</text>
+                <text className="graph-node-host-label" x={0} y={nodeRadius(pos) + 16}>{compactPeerDisplayName(node, t('common.routeDataPending'))}</text>
               </g>;
             })}
           </svg>
@@ -379,12 +385,22 @@ function graphLinkClass(link: TopologyGraphLink): string {
 }
 
 function nodeRadius(node: TopologyGraphPosition): number {
-  return 17 + Math.min(6, node.degree);
+  return node.radius;
 }
 
-function graphLinkLabel(link: TopologyGraphLink): string {
+function graphLinkLabel(link: TopologyGraphLink, linkCount: number): string {
   if (link.latencyMs !== undefined) return `${link.latencyMs} ms`;
-  return link.directedCount > 1 ? `x${link.directedCount}` : '';
+  if (link.sources.length > 1) return link.directedCount > 1 ? `x${link.directedCount}` : '';
+  if (linkCount <= 8 && link.directedCount > 1) return `x${link.directedCount}`;
+  return '';
+}
+
+function edgeLabelBgWidth(label: string): number {
+  return Math.max(28, label.length * 7 + 12);
+}
+
+function edgeLabelBgX(label: string): number {
+  return -edgeLabelBgWidth(label) / 2;
 }
 
 function graphLinkTitle(link: TopologyGraphLink, nodeByPeerId: Map<number, RoutePeerSnapshot>, t: Translator): string {

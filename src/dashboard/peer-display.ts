@@ -18,6 +18,13 @@ export function peerDisplayName(peer: PeerIdentityFields, fallback = 'unknown'):
   return fallback;
 }
 
+export function compactPeerDisplayName(peer: PeerIdentityFields, fallback = 'unknown', maxLength = 16): string {
+  const name = peerDisplayName(peer, fallback);
+  if (name.length <= maxLength) return name;
+  if (maxLength <= 3) return name.slice(0, Math.max(0, maxLength));
+  return `${name.slice(0, maxLength - 3)}...`;
+}
+
 export function peerFullLabel(peer: PeerIdentityFields, fallback = 'unknown'): string {
   if (peer.peerId === undefined) return peer.hostname ?? fallback;
   const peerId = `peer ${shortPeerId(peer.peerId, fallback)} (${peer.peerId})`;

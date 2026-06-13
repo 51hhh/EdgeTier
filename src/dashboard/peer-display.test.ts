@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { EDGE_PEER_ID } from '../easytier/constants';
-import { peerDisplayName, peerFullLabel, shortPeerId } from './peer-display';
+import { compactPeerDisplayName, peerDisplayName, peerFullLabel, shortPeerId } from './peer-display';
 
 describe('dashboard peer display helpers', () => {
   it('shortens long peer ids while keeping EdgeTier recognizable', () => {
@@ -14,5 +14,12 @@ describe('dashboard peer display helpers', () => {
     expect(peerDisplayName({ peerId: 4018890303, hostname: 'home-kwrt' })).toBe('home-kwrt');
     expect(peerDisplayName({ peerId: 4018890303 })).toBe('peer ...890303');
     expect(peerFullLabel({ peerId: 4018890303, hostname: 'home-kwrt' })).toBe('home-kwrt - peer ...890303 (4018890303)');
+  });
+
+  it('compacts graph labels while preserving full labels elsewhere', () => {
+    expect(compactPeerDisplayName({ peerId: 1, hostname: 'toe2-ubuntu24' })).toBe('toe2-ubuntu24');
+    expect(compactPeerDisplayName({ peerId: 1, hostname: 'very-long-hostname-for-graph' })).toBe('very-long-hos...');
+    expect(compactPeerDisplayName({ peerId: 1, hostname: '边缘节点拓扑图标签很长' }, 'unknown', 8)).toBe('边缘节点拓...');
+    expect(compactPeerDisplayName({ peerId: 4018890303 })).toBe('peer ...890303');
   });
 });

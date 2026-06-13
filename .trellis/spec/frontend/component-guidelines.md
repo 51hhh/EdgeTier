@@ -50,6 +50,7 @@ import { Badge, Button, Empty, Input, LayerCard, Table, Text, cn } from '@cloudf
 - Peer identifiers in dense tables, topology graphs, and matrix headers should use a short badge plus a hostname/subtitle when available, with the full peer id retained in `title`/detail text.
 - Topology graph layout should be derived from observed links and node degree. Do not pin `edgetier-worker`, `EDGE_PEER_ID`, or any other peer as a fixed center; the graph should represent the decoded EasyTier topology, not EdgeTier's observer viewpoint.
 - Topology graph edges must come from observed topology data only. Isolated nodes may render as nodes, but no synthetic edge should be drawn just to connect them to a center.
+- Topology graph node sets must include observed edge endpoints even when `RoutePeerInfo` details are still pending. Render those peers with the standard unknown/pending fallback rather than dropping their edges from the graph.
 - Missing last activity displays as `none`.
 - Status text should be short and badge-friendly.
 - Do not display full network secret digests.
@@ -70,6 +71,7 @@ import { Badge, Button, Empty, Input, LayerCard, Table, Text, cn } from '@cloudf
 | `peer.peerId` missing | Render `unknown` |
 | `peer.hostname` present | Render it as the primary human label or a subtitle near the shortened peer id |
 | Long numeric peer id | Render a shortened stable badge and keep the full id available in hover/detail text |
+| Topology edge endpoint lacks decoded route details | Render the endpoint in the graph with unknown/pending labels and keep the observed edge visible |
 | API error | Render visible `role="alert"` error without clearing previous successful data |
 | Lookup room name invalid | Render validation error and do not change selection |
 | Event type is `decode_error` or `limit_exceeded` | Use destructive badge variant |
@@ -82,6 +84,7 @@ import { Badge, Button, Empty, Input, LayerCard, Table, Text, cn } from '@cloudf
 - Good: use `<Badge>` for room id, active/stale state, peer status, and event type.
 - Good: use the shared peer display helper so Devices, Topology, route paths, and bitmap matrices all show peer ids/hostnames consistently.
 - Good: use a force-directed or similarly data-derived topology graph where node position responds to observed links and connection count.
+- Good: build topology graph node IDs from the union of decoded peer nodes and observed edge endpoints so pending route metadata does not hide real links.
 - Good: use `<Button type="button">` inside table cells for room selection so keyboard focus and activation work.
 - Good: use `<LayerCard>` for dashboard panels and metrics.
 - Good: use `<Empty>` for no rooms/no peers/no events states.
@@ -97,6 +100,7 @@ import { Badge, Button, Empty, Input, LayerCard, Table, Text, cn } from '@cloudf
 - Test extracted peer display helpers such as long-id shortening and hostname/full-id labels.
 - Future component test: empty room snapshot renders without throwing.
 - Future component test: peer without `peerId` renders `unknown`.
+- Test topology graph helpers so observed edge endpoints remain present when decoded route peer details are missing.
 - Future accessibility check if adding dialogs, command palette, or forms.
 
 ### 7. Wrong vs Correct
@@ -199,3 +203,13 @@ Required accessibility patterns:
 **Fix**: Compute graph layout from `TopologySnapshot.edges` and node degree. Render only observed links; leave isolated nodes unconnected.
 
 **Prevention**: Treat the graph as a decoded EasyTier relationship view. EdgeTier can appear as a normal node, but it must not be pinned or visually privileged unless the protocol data itself makes it central.
+
+### Common Mistake: Dropping edge-only topology peers
+
+**Symptom**: The graph table lists an edge or connection matrix relationship, but the SVG omits that peer or hides the link.
+
+**Cause**: Building graph nodes only from decoded `TopologySnapshot.nodes`; some EasyTier control data can expose an observed edge before full `RoutePeerInfo` metadata arrives.
+
+**Fix**: Build graph node IDs from decoded nodes plus observed edge endpoints. Use the normal unknown/pending peer label fallback for missing host/IP/version details.
+
+**Prevention**: Add helper-level regression coverage for edge endpoints without decoded route peer details.

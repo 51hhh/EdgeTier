@@ -57,6 +57,13 @@ body {
   margin: 6px 0;
 }
 
+.overview-metric-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 2px 0 4px;
+}
+
 .lookup {
   display: flex;
   flex-wrap: wrap;
@@ -146,28 +153,15 @@ body {
 .traffic-chart-panel {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
 }
 
 .chart-summary-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
 }
 
-.chart-stat {
-  min-height: 58px;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 4px;
-  border: 1px solid var(--color-kumo-hairline);
-  border-radius: 8px;
-  padding: 8px 10px;
-  background: var(--color-kumo-recessed);
-}
-
-.traffic-chart,
 .topology-graph {
   width: 100%;
   overflow: hidden;
@@ -176,82 +170,10 @@ body {
   background: var(--color-kumo-base);
 }
 
-.traffic-chart svg {
-  display: block;
-  width: 100%;
-  height: 220px;
-}
-
 .topology-graph svg {
   display: block;
   width: 100%;
-  min-height: 320px;
-}
-
-.chart-grid-line {
-  stroke: var(--color-kumo-hairline);
-  stroke-width: 1;
-}
-
-.chart-axis-line {
-  stroke: var(--color-kumo-subtle);
-  stroke-width: 1;
-  opacity: 0.55;
-  vector-effect: non-scaling-stroke;
-}
-
-.chart-axis-label {
-  fill: var(--color-kumo-subtle);
-  font-size: 11px;
-  text-anchor: end;
-  paint-order: stroke;
-  stroke: var(--color-kumo-base);
-  stroke-width: 4px;
-  stroke-linejoin: round;
-}
-
-.traffic-line {
-  fill: none;
-  stroke-width: 3;
-  vector-effect: non-scaling-stroke;
-}
-
-.traffic-line.rx {
-  stroke: var(--color-kumo-brand, #2563eb);
-}
-
-.traffic-line.tx {
-  stroke: var(--color-kumo-success, #11845b);
-}
-
-.traffic-area.rx {
-  fill: url("#traffic-rx-fill");
-}
-
-.traffic-area.tx {
-  fill: url("#traffic-tx-fill");
-}
-
-.traffic-endpoint {
-  stroke: var(--color-kumo-base);
-  stroke-width: 2;
-}
-
-.traffic-endpoint.rx {
-  fill: var(--color-kumo-brand, #2563eb);
-}
-
-.traffic-endpoint.tx {
-  fill: var(--color-kumo-success, #11845b);
-}
-
-.chart-time-axis {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 6px 10px 8px 44px;
-  color: var(--color-kumo-subtle);
-  font-size: 0.75rem;
+  min-height: 420px;
 }
 
 .chart-legend {
@@ -274,18 +196,66 @@ body {
   background: var(--color-kumo-hairline);
 }
 
-.legend-swatch.rx,
 .legend-swatch.bitmap {
   background: var(--color-kumo-brand, #2563eb);
 }
 
-.legend-swatch.tx,
 .legend-swatch.peer-center {
   background: var(--color-kumo-success, #11845b);
 }
 
 .legend-swatch.hybrid {
   background: linear-gradient(135deg, var(--color-kumo-brand, #2563eb) 0 48%, var(--color-kumo-success, #11845b) 52% 100%);
+}
+
+.metric-card {
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  min-width: 0;
+  min-height: 76px;
+  padding: 10px 12px;
+}
+
+.metric-card-inner {
+  min-width: 0;
+}
+
+.metric-card-inner > div {
+  min-width: 0;
+  width: 100%;
+  gap: 6px;
+  padding: 0;
+}
+
+.metric-card-inner > div > div:first-child {
+  min-width: 0;
+  align-items: flex-start;
+}
+
+.metric-card-inner > div > div:first-child span:last-child {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  line-height: 1.15;
+}
+
+.metric-card-inner > div > div:last-child {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.metric-card-inner > div > div:last-child span:first-child {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  line-height: 1.05;
+}
+
+.overview-status-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .graph-toolbar {
@@ -297,8 +267,9 @@ body {
 }
 
 .graph-edge {
-  stroke-width: 2;
-  opacity: 0.75;
+  stroke-linecap: round;
+  stroke-width: 1.8;
+  opacity: 0.58;
   vector-effect: non-scaling-stroke;
   transition: opacity 160ms ease, stroke-width 160ms ease;
 }
@@ -314,11 +285,27 @@ body {
 
 .graph-edge.hybrid {
   stroke: var(--color-kumo-brand, #2563eb);
-  stroke-width: 3;
+  stroke-width: 2.8;
   stroke-dasharray: 10 4 2 4;
+  opacity: 0.76;
 }
 
-.graph-edge-label,
+.graph-edge-label {
+  fill: var(--color-kumo-default);
+  font-size: 11px;
+  font-weight: 600;
+  text-anchor: middle;
+  pointer-events: none;
+}
+
+.graph-edge-label-bg {
+  fill: var(--color-kumo-base);
+  stroke: var(--color-kumo-hairline);
+  stroke-width: 1;
+  opacity: 0.92;
+  vector-effect: non-scaling-stroke;
+}
+
 .graph-node-label,
 .graph-node-host-label {
   fill: var(--color-kumo-default);
@@ -333,6 +320,7 @@ body {
 .graph-node-host-label {
   fill: var(--color-kumo-subtle);
   font-size: 11px;
+  max-width: 120px;
 }
 
 .graph-node-group {
@@ -436,7 +424,26 @@ code {
     padding: 18px;
   }
 
+  .overview-metric-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .metric-card {
+    min-height: 72px;
+  }
+
+  .topology-graph svg {
+    min-height: 360px;
+  }
+
   .lookup button {
     width: 100%;
+  }
+}
+
+@media (min-width: 1180px) {
+  .overview-metric-strip {
+    grid-template-columns: repeat(8, minmax(0, 1fr));
   }
 }
