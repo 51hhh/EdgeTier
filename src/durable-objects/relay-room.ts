@@ -65,6 +65,7 @@ type Session = PeerSnapshot & {
   ospfRouteSession?: OspfRouteSessionState;
   outboundPeerUri?: string;
   outboundHandshakeSent?: boolean;
+  routeInfoResyncRequestedAt?: number;
 };
 
 export interface NetworkConfig {
@@ -117,6 +118,7 @@ const DIRECTORY_SYNC_MIN_MS = 5_000;
 const CONTROL_STATE_PERSIST_MIN_MS = 2_000;
 const ROUTE_PUSH_MIN_MS = 10_000;
 const ROUTE_STATE_TTL_MS = 180_000;
+const ROUTE_INFO_RESYNC_MIN_MS = 30_000;
 const HEARTBEAT_INTERVAL_MS = 10_000;
 const CONNECTION_TIMEOUT_MS = 25_000;
 const MAINTENANCE_ALARM_MS = 5_000;
@@ -588,6 +590,7 @@ export class RelayRoom implements DurableObject {
     }
     if (changed) this.routeVersion += 1;
     this.topologyUpdatedAt = now;
+    this.requestRouteInfoResyncIfNeeded(session.roomId);
     this.queueDirectorySync(session.roomId);
     this.queueControlStatePersist();
     return changed;
@@ -661,6 +664,7 @@ export class RelayRoom implements DurableObject {
     this.peerCenter.set(sourcePeerId, { directPeers: cloneDirectPeers(req.peerInfos), lastSeen: now });
     this.peerCenterEdges = edgesFromPeerCenter(this.peerCenter);
     this.topologyUpdatedAt = now;
+    this.requestRouteInfoResyncIfNeeded(session.roomId);
     this.queueDirectorySync(session.roomId);
     this.queueControlStatePersist();
   }
@@ -672,8 +676,33 @@ export class RelayRoom implements DurableObject {
     }
     this.peerCenterEdges = edgesFromPeerCenter(this.peerCenter);
     this.topologyUpdatedAt = now;
+    this.requestRouteInfoResyncIfNeeded(session.roomId);
     this.queueDirectorySync(session.roomId);
     this.queueControlStatePersist();
+  }
+
+  private requestRouteInfoResyncIfNeeded(roomId: string, now = Date.now()): void {
+    const missingPeerIds = missingRouteInfoPeerIds(
+      this.routePeers.keys(),
+      this.connBitmapPeerIds,
+      this.peerCenterLastSeen().keys(),
+      [EDGE_PEER_ID, ...this.peers.keys()],
+    );
+    if (missingPeerIds.length === 0) return;
+
+    for (const session of this.sessions.values()) {
+      if (session.roomId !== roomId || !session.peerId || !session.handshakeAccepted) continue;
+      if (session.routeInfoResyncRequestedAt && now - session.routeInfoResyncRequestedAt < ROUTE_INFO_RESYNC_MIN_MS) continue;
+      const mySessionId = randomU64();
+      session.serverSessionId = mySessionId;
+      session.ospfRouteSession = createOspfRouteSessionState(mySessionId);
+      session.lastRoutePushAt = 0;
+      session.routeInfoResyncRequestedAt = now;
+      this.addEvent(roomId, 'rpc_seen', `route info resync requested (${missingPeerIds.length} missing peer record${missingPeerIds.length === 1 ? '' : 's'})`, session);
+      this.state.waitUntil(this.pushRouteUpdateTo(session, session.peerId, session.ospfDescriptor, true).catch(() => {
+        this.addEvent(roomId, 'decode_error', 'route info resync push failed', session);
+      }));
+    }
   }
 
   private buildPeerCenterGlobalMap(): PeerCenterGlobalMap {
@@ -1001,6 +1030,7 @@ export class RelayRoom implements DurableObject {
       ospfRouteSession: _ospfRouteSession,
       outboundPeerUri: _outboundPeerUri,
       outboundHandshakeSent: _outboundHandshakeSent,
+      routeInfoResyncRequestedAt: _routeInfoResyncRequestedAt,
       ...peer
     }) => ({ ...peer, latencyMs: peer.peerId ? peerLatencies.get(peer.peerId) ?? peer.latencyMs : peer.latencyMs }));
     const livePeerIds = new Set(livePeers.map((peer) => peer.peerId).filter((peerId): peerId is number => peerId !== undefined));
@@ -1228,10 +1258,9 @@ export class RelayRoom implements DurableObject {
 
   private pruneStaleRouteState(now = Date.now()): boolean {
     let changed = false;
+    const livePeerIds = new Set(this.peers.keys());
     for (const [peerId, peer] of this.routePeers.entries()) {
-      if (this.peers.has(peerId)) continue;
-      const lastSeen = Date.parse(peer.lastSeen);
-      if (!Number.isFinite(lastSeen) || now - lastSeen > ROUTE_STATE_TTL_MS) {
+      if (shouldPruneRoutePeer(peer, livePeerIds, now)) {
         this.routePeers.delete(peerId);
         this.rawRoutePeerInfos.delete(peerId);
         changed = true;
@@ -1694,6 +1723,30 @@ function topologyEdgeSignature(edges: TopologyEdge[]): string {
 
 function peerIdSignature(peerIds: number[]): string {
   return JSON.stringify([...peerIds].sort((a, b) => a - b));
+}
+
+export function shouldPruneRoutePeer(
+  peer: Pick<RoutePeerSnapshot, 'peerId' | 'sourcePeerId' | 'lastSeen'>,
+  livePeerIds: Set<number>,
+  now: number,
+): boolean {
+  if (livePeerIds.has(peer.peerId)) return false;
+  if (peer.sourcePeerId && livePeerIds.has(peer.sourcePeerId)) return false;
+  const lastSeen = Date.parse(peer.lastSeen);
+  return !Number.isFinite(lastSeen) || now - lastSeen > ROUTE_STATE_TTL_MS;
+}
+
+export function missingRouteInfoPeerIds(
+  routePeerIds: Iterable<number>,
+  connBitmapPeerIds: Iterable<number>,
+  peerCenterPeerIds: Iterable<number>,
+  excludedPeerIds: Iterable<number> = [],
+): number[] {
+  const knownRoutes = new Set(routePeerIds);
+  const excluded = new Set(excludedPeerIds);
+  return [...new Set([...connBitmapPeerIds, ...peerCenterPeerIds])]
+    .filter((peerId) => Number.isInteger(peerId) && peerId > 0 && !knownRoutes.has(peerId) && !excluded.has(peerId))
+    .sort((a, b) => a - b);
 }
 
 function firstNetworkLength(infos: Map<number, RoutePeerInfo>): number | undefined {

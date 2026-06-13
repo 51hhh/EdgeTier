@@ -176,6 +176,8 @@ interface PersistedControlState {
 | Stored route peer has invalid `peerId` | Drop that entry during load |
 | Stored PeerCenter latency is non-finite | Drop that direct-peer entry during load |
 | Route/PeerCenter entry is older than relay TTL and has no live session | Prune it and persist the pruned state |
+| RoutePeerInfo is older than relay TTL but `sourcePeerId` is still a live session | Keep it; EasyTier OSPF sends versioned deltas and may not resend unchanged peer info |
+| conn bitmap or PeerCenter references a peer without local RoutePeerInfo | Trigger a bounded OSPF route-session resync; do not leave the UI permanently on route-data-pending |
 | WebSocket is open but silent beyond heartbeat timeout after EdgeTier sent Ping | Close the socket and run normal disconnect cleanup |
 | Test seed clear is requested | Clear in-memory observer state and persist the empty control state |
 
@@ -183,15 +185,20 @@ interface PersistedControlState {
 
 - Good: persist `routePeers`, `rawRoutePeerInfos`, `connBitmapPeerIds`, `connBitmapEdges`, and PeerCenter latency maps under `control-state:v1`.
 - Good: rehydrate route/PeerCenter observer state after Durable Object eviction, then prune stale entries before serving snapshots.
+- Good: keep stale-looking `RoutePeerInfo` while its source peer is still connected; disconnect cleanup removes state by `sourcePeerId`.
+- Good: when topology has peer ids from conn bitmap/PeerCenter but route data is missing, rotate the local OSPF route session id and push a route update to request a full delta from the official node.
 - Base: after a cold start with no persisted state, `/api/rooms/:id/topology` returns empty nodes/edges plus a zero summary.
 - Bad: storing `DerivedKeys`, `networkSecret`, WebSocket handles, raw packet payloads, or full digests in Durable Object storage.
 - Bad: treating persisted route state as proof of live WebSocket connectivity.
+- Bad: deleting RoutePeerInfo by wall-clock TTL while the source peer remains live; official EasyTier will usually keep sending `SyncRouteInfo` with 0 peer info items because versions did not change.
 
 ### 6. Tests Required
 
 - Unit test config/storage helper behavior when exposed as pure functions.
 - Unit test topology summary fields when DTO shape changes.
 - Regression test route bitmap builders do not synthesize full-mesh edges unless observed.
+- Regression test route retention keeps RoutePeerInfo from live sources past the stale TTL.
+- Regression test missing route-info detection covers conn bitmap / PeerCenter peer ids without RoutePeerInfo.
 - Future integration test: persisted control state reloads after Durable Object restart and stale entries are pruned.
 - Future live validation: real node disconnect removes route/PeerCenter entries from the dashboard within the heartbeat/TTL window.
 

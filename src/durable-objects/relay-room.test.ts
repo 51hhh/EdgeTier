@@ -11,10 +11,12 @@ import {
   buildTopologySummary,
   createOspfRouteSessionState,
   framePeerBindingCandidate,
+  missingRouteInfoPeerIds,
   resolveDefaultRoomConfig,
   resolveNetworkConfig,
   resolveOutboundTcpPeers,
   selectRoutePeerInfosForSync,
+  shouldPruneRoutePeer,
   toArrayBuffer,
   updateOspfRouteSessionFromRequest,
 } from './relay-room';
@@ -359,6 +361,38 @@ describe('connection matrix and route paths', () => {
       { peerId: 20, nextHopPeerId: 10, hopCount: 2, pathPeerIds: [EDGE_PEER_ID, 10, 20], source: 'conn_bitmap', latencyMs: 46, cost: undefined, lossRate: undefined },
       { peerId: 30, pathPeerIds: [], source: 'unreachable', cost: undefined, lossRate: undefined },
     ]);
+  });
+});
+
+describe('route info retention and resync gaps', () => {
+  it('keeps stale route peer records while their source peer is still live', () => {
+    const now = Date.parse('2026-06-13T00:05:00.000Z');
+    const staleLastSeen = '2026-06-13T00:00:00.000Z';
+
+    expect(shouldPruneRoutePeer(
+      { peerId: 200, sourcePeerId: 100, lastSeen: staleLastSeen },
+      new Set([100]),
+      now,
+    )).toBe(false);
+    expect(shouldPruneRoutePeer(
+      { peerId: 200, sourcePeerId: 100, lastSeen: staleLastSeen },
+      new Set<number>(),
+      now,
+    )).toBe(true);
+    expect(shouldPruneRoutePeer(
+      { peerId: 100, lastSeen: staleLastSeen },
+      new Set([100]),
+      now,
+    )).toBe(false);
+  });
+
+  it('detects peers present in conn bitmap or PeerCenter but missing RoutePeerInfo', () => {
+    expect(missingRouteInfoPeerIds(
+      [100],
+      [100, 200, 300],
+      [300, 400],
+      [EDGE_PEER_ID, 400],
+    )).toEqual([200, 300]);
   });
 });
 
