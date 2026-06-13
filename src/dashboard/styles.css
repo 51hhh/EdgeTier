@@ -301,17 +301,17 @@ body {
 }
 
 .graph-edge {
-  stroke: var(--color-kumo-default);
+  stroke: #666;
   stroke-linecap: round;
-  stroke-width: 2;
-  opacity: 0.5;
+  stroke-width: 2.5;
+  opacity: 1;
   vector-effect: non-scaling-stroke;
   transition: opacity 160ms ease, stroke-width 160ms ease;
 }
 
 .graph-edge:hover {
-  opacity: 0.9;
-  stroke-width: 3;
+  stroke: #333;
+  stroke-width: 3.5;
 }
 
 .graph-edge-label {

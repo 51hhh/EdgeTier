@@ -221,7 +221,7 @@ function ConnectionGraph({ topology, nodeByPeerId, t }: { topology?: TopologySna
                 const labelY = labelPos ? Math.round(labelPos.y + labelPos.offsetY) : Math.round((from.y + to.y) / 2);
                 return <g key={linkKey}>
                   <title>{graphLinkTitle(link, nodeByPeerId, t)}</title>
-                  <line className="graph-edge" x1={from.x} y1={from.y} x2={to.x} y2={to.y} strokeWidth={2} />
+                  <line className="graph-edge" x1={from.x} y1={from.y} x2={to.x} y2={to.y} />
                   {label && <g className="graph-edge-label-group" transform={`translate(${labelX} ${labelY})`}>
                     <rect className="graph-edge-label-bg" x={edgeLabelBgX(label)} y={-9} width={edgeLabelBgWidth(label)} height={16} rx={4} />
                     <text className="graph-edge-label" x={0} y={3}>{label}</text>
