@@ -4,9 +4,10 @@ import { buildHandshakeRequest, buildHandshakeResponse, decodeHandshake, encodeH
 import { createEasyTierFrame, parseEasyTierHeader, payloadLengthMatches, splitEasyTierFrames, type EasyTierPacketHeader } from '../easytier/packet';
 import { bytesEqual, hex } from '../easytier/protobuf';
 import {
-  buildRpcRequestPayload,
-  buildRpcResponsePayload,
-  decodeEasyTierRpcPayload,
+  buildRpcRequestPayloads,
+  buildRpcResponsePayloads,
+  decodeEasyTierRpcPacket,
+  decodeRpcPacket,
   encodeDirectConnectorGetIpListResponse,
   encodeGetGlobalPeerMapRequest,
   encodeGetGlobalPeerMapResponse,
@@ -25,10 +26,13 @@ import {
   type RouteConnBitmap,
   type RouteConnPeerList,
   type RoutePeerInfo,
+  type RpcPacket,
+  RpcPacketMerger,
+  rpcPacketMergerKey,
   type SyncRouteInfoRequest,
   type SyncRouteInfoResponse,
 } from '../easytier/rpc';
-import { encodeTcpTunnelFrame, parseTcpPeerUri, TcpTunnelFrameDecoder, type TcpPeerAddress } from '../easytier/tcp-frame';
+import { EASYTIER_TCP_MTU_BYTES, encodeTcpTunnelFrame, parseTcpPeerUri, TcpTunnelFrameDecoder, type TcpPeerAddress } from '../easytier/tcp-frame';
 import type {
   ConnectionMatrixSnapshot,
   PeerSnapshot,
@@ -63,6 +67,7 @@ type Session = PeerSnapshot & {
   lastPongReceived: number;
   ospfDescriptor?: DecodedEasyTierRpc['descriptor'];
   ospfRouteSession?: OspfRouteSessionState;
+  rpcMergers: Map<string, RpcPacketMerger>;
   outboundPeerUri?: string;
   outboundHandshakeSent?: boolean;
   routeInfoResyncRequestedAt?: number;
@@ -92,6 +97,7 @@ interface PersistedControlState {
   connBitmapPeerIds?: number[];
   connBitmapEdges: TopologyEdge[];
   peerCenter: PersistedPeerCenterEntry[];
+  outboundRoomIds?: string[];
 }
 
 export interface PendingRouteSync {
@@ -119,6 +125,7 @@ const CONTROL_STATE_PERSIST_MIN_MS = 2_000;
 const ROUTE_PUSH_MIN_MS = 10_000;
 const ROUTE_STATE_TTL_MS = 180_000;
 const ROUTE_INFO_RESYNC_MIN_MS = 30_000;
+const RPC_MERGER_TTL_MS = 30_000;
 const HEARTBEAT_INTERVAL_MS = 10_000;
 const CONNECTION_TIMEOUT_MS = 25_000;
 const MAINTENANCE_ALARM_MS = 5_000;
@@ -148,6 +155,7 @@ export class RelayRoom implements DurableObject {
   private lastControlStatePersist = 0;
   private controlStatePersistQueued = false;
   private outboundTcpConnecting = new Set<string>();
+  private knownOutboundRoomIds = new Set<string>();
 
   constructor(private readonly state: DurableObjectState, private readonly env: Env) {
     this.state.blockConcurrencyWhile(async () => {
@@ -160,6 +168,7 @@ export class RelayRoom implements DurableObject {
     const url = new URL(request.url);
     const roomId = url.searchParams.get('room') ?? 'default';
     if (url.pathname === '/connect') return this.acceptWebSocket(request, roomId);
+    this.rememberOutboundRoomIfConfigured(roomId);
     this.state.waitUntil(this.ensureConfiguredOutboundTcp(roomId).catch(() => {
       this.addEvent(roomId, 'decode_error', 'outbound tcp startup failed');
     }));
@@ -173,10 +182,11 @@ export class RelayRoom implements DurableObject {
   }
 
   async alarm(): Promise<void> {
-    const roomId = this.currentRoomId();
+    const outboundRoomIds = this.outboundRoomIdsForMaintenance();
+    const roomId = this.currentRoomId() ?? outboundRoomIds[0];
     const pruned = this.pruneStaleRouteState();
     this.runHeartbeatMaintenance();
-    if (roomId) await this.ensureConfiguredOutboundTcp(roomId);
+    for (const outboundRoomId of outboundRoomIds) await this.ensureConfiguredOutboundTcp(outboundRoomId);
     if (pruned) {
       await this.persistControlState();
       if (roomId) await this.syncDirectory(roomId);
@@ -218,6 +228,7 @@ export class RelayRoom implements DurableObject {
       writeQueue: Promise.resolve(),
       lastPingSent: 0,
       lastPongReceived: nowMs,
+      rpcMergers: new Map(),
     };
     this.sessions.set(session.sessionId, session);
     this.addEvent(roomId, 'connected', 'websocket connected', session);
@@ -406,9 +417,36 @@ export class RelayRoom implements DurableObject {
       }
     }
 
+    let packet: RpcPacket;
+    try {
+      packet = decodeRpcPacket(body);
+    } catch {
+      const rpc = observeRpc(header, frame);
+      this.addEvent(session.roomId, 'rpc_seen', rpc.message, session);
+      return false;
+    }
+
+    if (isFragmentedRpcPacket(packet)) {
+      if (!targetIsEdge) {
+        this.addEvent(session.roomId, 'rpc_seen', rpcFragmentMessage(packet), session);
+        return false;
+      }
+      try {
+        const merged = this.mergeRpcPacket(session, header, packet);
+        if (!merged) {
+          this.addEvent(session.roomId, 'rpc_seen', rpcFragmentMessage(packet), session);
+          return true;
+        }
+        packet = merged;
+      } catch {
+        this.addEvent(session.roomId, 'decode_error', 'RPC fragment merge failed', session);
+        return true;
+      }
+    }
+
     let decoded: DecodedEasyTierRpc;
     try {
-      decoded = decodeEasyTierRpcPayload(body);
+      decoded = decodeEasyTierRpcPacket(packet);
     } catch {
       const rpc = observeRpc(header, frame);
       this.addEvent(session.roomId, 'rpc_seen', rpc.message, session);
@@ -486,6 +524,26 @@ export class RelayRoom implements DurableObject {
     return targetIsEdge;
   }
 
+  private mergeRpcPacket(session: Session, header: EasyTierPacketHeader, packet: RpcPacket): RpcPacket | undefined {
+    this.pruneRpcMergers(session);
+    const direction = header.packetType === EasyTierPacketType.RpcReq ? 'req' : 'resp';
+    const key = rpcPacketMergerKey(direction, packet);
+    let merger = session.rpcMergers.get(key);
+    if (!merger) {
+      merger = new RpcPacketMerger();
+      session.rpcMergers.set(key, merger);
+    }
+    const merged = merger.feed(packet);
+    if (merged) session.rpcMergers.delete(key);
+    return merged;
+  }
+
+  private pruneRpcMergers(session: Session, now = Date.now()): void {
+    for (const [key, merger] of session.rpcMergers.entries()) {
+      if (now - merger.lastUpdated > RPC_MERGER_TTL_MS) session.rpcMergers.delete(key);
+    }
+  }
+
   private forwardOrRecordUnroutable(session: Session, header: EasyTierPacketHeader, frame: ArrayBuffer): void {
     const targetSessionId = header.toPeerId ? this.peers.get(header.toPeerId) : undefined;
     const target = targetSessionId ? this.sessions.get(targetSessionId) : undefined;
@@ -502,35 +560,44 @@ export class RelayRoom implements DurableObject {
   }
 
   private async sendRpcResponse(session: Session, toPeerId: number, decoded: DecodedEasyTierRpc, responseBody: Uint8Array): Promise<void> {
-    let payload = buildRpcResponsePayload(decoded.packet, responseBody);
-    const declaredLen = payload.length;
-    let flags = 0;
-    if (session.keys) {
-      payload = await encryptAesGcm(payload, session.keys.key128);
-      flags = 1;
+    const payloads = buildRpcResponsePayloads(decoded.packet, responseBody, this.rpcPayloadBudget(session));
+    for (const plaintext of payloads) {
+      await this.sendRpcPayload(session, toPeerId, EasyTierPacketType.RpcResp, plaintext);
     }
-    this.sendFrame(session, toPeerId, EasyTierPacketType.RpcResp, payload, flags, declaredLen);
   }
 
   private async sendRpcRequest(session: Session, toPeerId: number, descriptor: DecodedEasyTierRpc['descriptor'], requestBody: Uint8Array): Promise<bigint> {
     const transactionId = randomU64();
     const domainName = session.networkName ?? this.expectedNetworkName(session.roomId);
-    let payload = buildRpcRequestPayload({
+    const payloads = buildRpcRequestPayloads({
       fromPeer: EDGE_PEER_ID,
       toPeer: toPeerId,
       transactionId,
       descriptor: descriptor ?? normalizeOspfDescriptor(session.ospfDescriptor, domainName),
       requestBody,
       timeoutMs: 5_000,
+      maxPayloadSize: this.rpcPayloadBudget(session),
     });
-    const declaredLen = payload.length;
+    for (const plaintext of payloads) {
+      await this.sendRpcPayload(session, toPeerId, EasyTierPacketType.RpcReq, plaintext);
+    }
+    return transactionId;
+  }
+
+  private async sendRpcPayload(session: Session, toPeerId: number, packetType: EasyTierPacketType.RpcReq | EasyTierPacketType.RpcResp, plaintext: Uint8Array): Promise<void> {
+    let payload = plaintext;
+    const declaredLen = plaintext.length;
     let flags = 0;
     if (session.keys) {
-      payload = await encryptAesGcm(payload, session.keys.key128);
+      payload = await encryptAesGcm(plaintext, session.keys.key128);
       flags = 1;
     }
-    this.sendFrame(session, toPeerId, EasyTierPacketType.RpcReq, payload, flags, declaredLen);
-    return transactionId;
+    this.sendFrame(session, toPeerId, packetType, payload, flags, declaredLen);
+  }
+
+  private rpcPayloadBudget(session: Session): number | undefined {
+    if (session.transportKind !== 'tcp-outbound') return undefined;
+    return EASYTIER_TCP_MTU_BYTES - EASYTIER_HEADER_SIZE - (session.keys ? AEAD_TAIL_SIZE : 0);
   }
 
   private async bootstrapControlPlane(session: Session, toPeerId: number): Promise<void> {
@@ -812,9 +879,27 @@ export class RelayRoom implements DurableObject {
     };
   }
 
+  private rememberOutboundRoomIfConfigured(roomId: string): boolean {
+    if (resolveOutboundTcpPeers(this.env, roomId).length === 0) return false;
+    return this.rememberOutboundRoom(roomId);
+  }
+
+  private rememberOutboundRoom(roomId: string): boolean {
+    if (!ROOM_NAME_PATTERN.test(roomId)) return false;
+    if (this.knownOutboundRoomIds.has(roomId)) return true;
+    this.knownOutboundRoomIds.add(roomId);
+    this.queueControlStatePersist(true);
+    return true;
+  }
+
+  private outboundRoomIdsForMaintenance(): string[] {
+    return outboundRoomIdsForMaintenance(this.env, this.knownOutboundRoomIds);
+  }
+
   private async ensureConfiguredOutboundTcp(roomId: string): Promise<void> {
     const peers = resolveOutboundTcpPeers(this.env, roomId);
     if (peers.length === 0) {
+      if (this.knownOutboundRoomIds.delete(roomId)) this.queueControlStatePersist(true);
       for (const session of [...this.sessions.values()]) {
         if (session.roomId !== roomId || session.transportKind !== 'tcp-outbound') continue;
         this.closeSessionTransport(session, 1000, 'outbound tcp disabled for room');
@@ -822,6 +907,7 @@ export class RelayRoom implements DurableObject {
       }
       return;
     }
+    this.rememberOutboundRoom(roomId);
     await Promise.all(peers.map((peer) => this.connectOutboundTcp(roomId, peer)));
     await this.ensureMaintenanceAlarm();
   }
@@ -890,6 +976,7 @@ export class RelayRoom implements DurableObject {
       writeQueue: Promise.resolve(),
       lastPingSent: 0,
       lastPongReceived: nowMs,
+      rpcMergers: new Map(),
       outboundPeerUri: peerUri,
     };
   }
@@ -1028,6 +1115,7 @@ export class RelayRoom implements DurableObject {
       lastPongReceived: _lastPongReceived,
       ospfDescriptor: _ospfDescriptor,
       ospfRouteSession: _ospfRouteSession,
+      rpcMergers: _rpcMergers,
       outboundPeerUri: _outboundPeerUri,
       outboundHandshakeSent: _outboundHandshakeSent,
       routeInfoResyncRequestedAt: _routeInfoResyncRequestedAt,
@@ -1341,6 +1429,7 @@ export class RelayRoom implements DurableObject {
 
   private async loadControlState(): Promise<void> {
     const stored = await this.state.storage.get<PersistedControlState>(CONTROL_STATE_STORAGE_KEY);
+    this.knownOutboundRoomIds = new Set(outboundRoomIdsForMaintenance(this.env, stored?.outboundRoomIds ?? []));
     if (!stored) return;
     this.routeVersion = Math.max(this.routeVersion, safeU32(stored.routeVersion, this.routeVersion));
     this.topologyUpdatedAt = typeof stored.topologyUpdatedAt === 'string' ? stored.topologyUpdatedAt : undefined;
@@ -1397,12 +1486,12 @@ export class RelayRoom implements DurableObject {
         lastSeen: info.lastSeen,
         directPeers: [...info.directPeers.entries()].map(([toPeerId, direct]) => [toPeerId, { latencyMs: direct.latencyMs }]),
       })),
+      outboundRoomIds: [...this.knownOutboundRoomIds].filter((roomId) => ROOM_NAME_PATTERN.test(roomId)).sort(),
     });
   }
 
   private async ensureMaintenanceAlarm(): Promise<void> {
-    const roomId = this.currentRoomId();
-    const hasConfiguredOutbound = roomId ? resolveOutboundTcpPeers(this.env, roomId).length > 0 : false;
+    const hasConfiguredOutbound = this.outboundRoomIdsForMaintenance().length > 0;
     if (this.sessions.size === 0 && !this.hasObservedNetworkState() && !hasConfiguredOutbound) return;
     const existing = await this.state.storage.getAlarm();
     const next = Date.now() + MAINTENANCE_ALARM_MS;
@@ -1516,6 +1605,18 @@ async function decryptEasyTierPayload(payload: Uint8Array, keys: DerivedKeys): P
 function randomU64(): bigint {
   const words = crypto.getRandomValues(new Uint32Array(2));
   return (BigInt(words[0]) << 32n) | BigInt(words[1]);
+}
+
+function isFragmentedRpcPacket(packet: RpcPacket): boolean {
+  const totalPieces = packet.totalPieces ?? 0;
+  const pieceIdx = packet.pieceIdx ?? 0;
+  return !(totalPieces === 0 && pieceIdx === 0) && !(totalPieces === 1 && pieceIdx === 0);
+}
+
+function rpcFragmentMessage(packet: RpcPacket): string {
+  const totalPieces = packet.totalPieces ?? 0;
+  const pieceIdx = packet.pieceIdx ?? 0;
+  return `RPC fragment received (${pieceIdx + 1}/${totalPieces || 'unknown'})`;
 }
 
 function ensureOspfRouteSession(session: Session): OspfRouteSessionState {
@@ -1697,6 +1798,7 @@ function cloneRoutePeerInfo(info: RoutePeerInfo): RoutePeerInfo {
     easytierVersion: info.easytierVersion,
     peerRouteId: info.peerRouteId,
     networkLength: info.networkLength,
+    rawUnknownFields: info.rawUnknownFields?.map(copyBytes),
   };
 }
 
@@ -1714,7 +1816,14 @@ function routePeerInfoSignature(info: RoutePeerInfo): string {
     info.easytierVersion,
     info.peerRouteId,
     info.networkLength,
+    (info.rawUnknownFields ?? []).map(hex),
   ]);
+}
+
+function copyBytes(bytes: Uint8Array): Uint8Array {
+  const copy = new Uint8Array(bytes.length);
+  copy.set(bytes);
+  return copy;
 }
 
 function topologyEdgeSignature(edges: TopologyEdge[]): string {
@@ -2157,7 +2266,7 @@ export function resolveOutboundTcpPeers(
   env: Pick<Env, 'EASYTIER_PUBLIC_PEER_TCP' | 'EASYTIER_OUTBOUND_TCP_PEERS'>,
   roomId: string,
 ): TcpPeerAddress[] {
-  if (roomId === 'null' || roomId === 'undefined') return [];
+  if (!ROOM_NAME_PATTERN.test(roomId) || roomId === 'null' || roomId === 'undefined') return [];
   const candidates = [
     ...parseOutboundTcpPeerConfig(env.EASYTIER_OUTBOUND_TCP_PEERS, roomId),
     ...splitPeerList(env.EASYTIER_PUBLIC_PEER_TCP),
@@ -2168,6 +2277,23 @@ export function resolveOutboundTcpPeers(
     if (peer) peers.set(peer.uri, peer);
   }
   return [...peers.values()];
+}
+
+export function outboundRoomIdsForMaintenance(
+  env: Pick<Env, 'EASYTIER_NETWORK_NAME' | 'EASYTIER_NETWORK_SECRET' | 'EASYTIER_NETWORK_SECRETS' | 'EASYTIER_NETWORKS' | 'EASYTIER_PUBLIC_PEER_TCP' | 'EASYTIER_OUTBOUND_TCP_PEERS'>,
+  storedRoomIds: Iterable<string> = [],
+): string[] {
+  const candidates = new Set<string>();
+  for (const roomId of storedRoomIds) {
+    if (ROOM_NAME_PATTERN.test(roomId)) candidates.add(roomId);
+  }
+  const defaultRoom = resolveDefaultRoomConfig(env).roomId;
+  if (ROOM_NAME_PATTERN.test(defaultRoom)) candidates.add(defaultRoom);
+  for (const roomId of outboundTcpConfigRoomIds(env.EASYTIER_OUTBOUND_TCP_PEERS)) candidates.add(roomId);
+
+  return [...candidates]
+    .filter((roomId) => ROOM_NAME_PATTERN.test(roomId) && resolveOutboundTcpPeers(env, roomId).length > 0)
+    .sort();
 }
 
 function parseOutboundTcpPeerConfig(raw: string | undefined, roomId: string): string[] {
@@ -2182,6 +2308,18 @@ function parseOutboundTcpPeerConfig(raw: string | undefined, roomId: string): st
     return collectOutboundPeerValues(roomValue);
   } catch {
     return splitPeerList(raw);
+  }
+}
+
+function outboundTcpConfigRoomIds(raw: string | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
+    return Object.keys(parsed as Record<string, unknown>)
+      .filter((roomId) => roomId !== 'default' && roomId !== '*' && ROOM_NAME_PATTERN.test(roomId));
+  } catch {
+    return [];
   }
 }
 

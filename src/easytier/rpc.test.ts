@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { EDGE_PEER_ID } from './constants';
 import { finish, ProtoReader, writeBytesField, writeInt32Field, writeUint32Field, writeUint64Field } from './protobuf';
 import {
+  buildRpcRequestPayloads,
   buildRpcResponsePayload,
   buildRpcRequestPayload,
   CompressionAlgo,
   decodeEasyTierRpcPayload,
+  decodeEasyTierRpcPacket,
   decodeRpcPacket,
   encodeGetGlobalPeerMapRequest,
   encodeGetGlobalPeerMapResponse,
@@ -13,6 +15,7 @@ import {
   encodeSyncRouteInfoRequest,
   encodeSyncRouteInfoResponse,
   natTypeName,
+  RpcPacketMerger,
   type PeerCenterGlobalMap,
   type RpcDescriptor,
   type RpcPacket,
@@ -314,6 +317,89 @@ describe('EasyTier RPC codec', () => {
       networkLength: 24,
     });
     expect(decoded.syncRouteInfo?.connBitmap?.peerIds.map((item) => item.peerId)).toEqual([EDGE_PEER_ID, 42]);
+  });
+
+  it('splits and merges fragmented RpcRequest payloads', () => {
+    const requestBody = encodeSyncRouteInfoRequest({
+      myPeerId: EDGE_PEER_ID,
+      mySessionId: 99n,
+      isInitiator: true,
+      peerInfos: Array.from({ length: 24 }, (_, index) => ({
+        peerId: 10_000 + index,
+        cost: 1,
+        ipv4: `10.144.1.${index + 1}`,
+        proxyCidrs: [],
+        hostname: `node-${index}`,
+        udpNatType: 3,
+        version: 100 + index,
+        easytierVersion: '2.6.4-test',
+        networkLength: 24,
+      })),
+    });
+
+    const payloads = buildRpcRequestPayloads({
+      fromPeer: EDGE_PEER_ID,
+      toPeer: 42,
+      transactionId: 987n,
+      descriptor: { protoName: 'peer_rpc', serviceName: 'OspfRouteRpc', methodIndex: 1 },
+      requestBody,
+      maxPayloadSize: 180,
+    });
+
+    expect(payloads.length).toBeGreaterThan(1);
+    expect(payloads.every((payload) => payload.length <= 180)).toBe(true);
+
+    const merger = new RpcPacketMerger();
+    let merged: RpcPacket | undefined;
+    for (const payload of [...payloads].reverse()) {
+      merged = merger.feed(decodeRpcPacket(payload)) ?? merged;
+    }
+
+    expect(merged).toBeDefined();
+    expect(merged?.totalPieces).toBe(1);
+    expect(merged?.pieceIdx).toBe(0);
+    const decoded = decodeEasyTierRpcPacket(merged!);
+    expect(decoded.service).toBe('OspfRouteRpc.SyncRouteInfo');
+    expect(decoded.syncRouteInfo?.peerInfos).toHaveLength(24);
+    expect(decoded.syncRouteInfo?.peerInfos[23].hostname).toBe('node-23');
+  });
+
+  it('preserves raw RoutePeerInfo fields that EdgeTier does not model yet', () => {
+    const routePeerInfo: number[] = [];
+    writeUint32Field(routePeerInfo, 1, 42);
+    writeUint32Field(routePeerInfo, 3, 1);
+    writeBytesField(routePeerInfo, 6, new TextEncoder().encode('node-with-extra'));
+    writeBytesField(routePeerInfo, 18, new Uint8Array([1, 2, 3]));
+
+    const routePeerInfos: number[] = [];
+    writeBytesField(routePeerInfos, 1, finish(routePeerInfo));
+
+    const syncRouteInfo: number[] = [];
+    writeUint32Field(syncRouteInfo, 1, 42);
+    writeUint64Field(syncRouteInfo, 2, 10n);
+    writeBytesField(syncRouteInfo, 4, finish(routePeerInfos));
+
+    const decoded = decodeEasyTierRpcPayload(buildRpcRequestPayload({
+      fromPeer: 42,
+      toPeer: EDGE_PEER_ID,
+      transactionId: 222n,
+      descriptor: { protoName: 'peer_rpc', serviceName: 'OspfRouteRpc', methodIndex: 1 },
+      requestBody: finish(syncRouteInfo),
+    }));
+
+    const peerInfo = decoded.syncRouteInfo?.peerInfos[0];
+    expect(peerInfo).toMatchObject({ peerId: 42, hostname: 'node-with-extra' });
+    expect(peerInfo?.rawUnknownFields?.[0]).toEqual(new Uint8Array([0x92, 0x01, 0x03, 0x01, 0x02, 0x03]));
+
+    const roundTrip = decodeEasyTierRpcPayload(buildRpcRequestPayload({
+      fromPeer: 42,
+      toPeer: EDGE_PEER_ID,
+      transactionId: 223n,
+      descriptor: { protoName: 'peer_rpc', serviceName: 'OspfRouteRpc', methodIndex: 1 },
+      requestBody: encodeSyncRouteInfoRequest(decoded.syncRouteInfo!),
+    }));
+
+    expect(roundTrip.syncRouteInfo?.peerInfos[0].rawUnknownFields?.[0]).toEqual(new Uint8Array([0x92, 0x01, 0x03, 0x01, 0x02, 0x03]));
   });
 
   it('decodes SyncRouteInfo RouteConnPeerList oneof field 7', () => {

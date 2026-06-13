@@ -16,6 +16,10 @@ export class ProtoReader {
 
   constructor(private readonly buf: Uint8Array) {}
 
+  get offset(): number {
+    return this.pos;
+  }
+
   get done(): boolean {
     return this.pos >= this.buf.length;
   }
@@ -100,6 +104,15 @@ export class ProtoReader {
       return;
     }
     throw new Error(`unsupported protobuf wire type ${wire}`);
+  }
+
+  rawFrom(start: number): Uint8Array {
+    if (!Number.isInteger(start) || start < 0 || start > this.pos) {
+      throw new Error('protobuf raw field start out of range');
+    }
+    const out = new Uint8Array(this.pos - start);
+    out.set(this.buf.subarray(start, this.pos));
+    return out;
   }
 }
 

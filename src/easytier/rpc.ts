@@ -33,6 +33,8 @@ export const NAT_TYPE_NAMES = [
   'SymmetricEasyDec',
 ] as const;
 
+const MAX_RPC_PIECES = 32 * 1024;
+
 export interface RpcDescriptor {
   domainName?: string;
   protoName?: string;
@@ -77,6 +79,7 @@ export interface RoutePeerInfo {
   easytierVersion?: string;
   peerRouteId?: string;
   networkLength?: number;
+  rawUnknownFields?: Uint8Array[];
 }
 
 export interface PeerIdVersion {
@@ -169,6 +172,17 @@ export interface DecodedEasyTierRpc {
   unsupportedCompression?: number;
 }
 
+export interface BuildRpcRequestPayloadArgs {
+  fromPeer: number;
+  toPeer: number;
+  transactionId: bigint | number | string;
+  descriptor: RpcDescriptor;
+  requestBody: Uint8Array;
+  timeoutMs?: number;
+  traceId?: number;
+  maxPayloadSize?: number;
+}
+
 export function observeHandshake(header: EasyTierPacketHeader, frame: ArrayBuffer): HandshakeObservation {
   try {
     const req = decodeHandshake(new Uint8Array(frame, EASYTIER_HEADER_SIZE));
@@ -200,7 +214,10 @@ export function observeRpc(_header: EasyTierPacketHeader, frame: ArrayBuffer): R
 }
 
 export function decodeEasyTierRpcPayload(payload: Uint8Array): DecodedEasyTierRpc {
-  const packet = decodeRpcPacket(payload);
+  return decodeEasyTierRpcPacket(decodeRpcPacket(payload));
+}
+
+export function decodeEasyTierRpcPacket(packet: RpcPacket): DecodedEasyTierRpc {
   const descriptor = packet.descriptor;
 
   if (packet.compressionInfo?.algo === CompressionAlgo.Zstd) {
@@ -402,6 +419,67 @@ export function decodeRpcPacket(payload: Uint8Array): RpcPacket {
   return packet;
 }
 
+export class RpcPacketMerger {
+  private firstPiece: RpcPacket | undefined;
+  private pieces: Array<RpcPacket | undefined> = [];
+  private currentKey: string | undefined;
+  lastUpdated = Date.now();
+
+  feed(packet: RpcPacket): RpcPacket | undefined {
+    const totalPieces = packet.totalPieces ?? 0;
+    const pieceIdx = packet.pieceIdx ?? 0;
+
+    // Compatibility with older EasyTier packets that did not set piece fields.
+    if (totalPieces === 0 && pieceIdx === 0) return packet;
+    if (pieceIdx === 0 && !packet.descriptor) throw new Error('RPC first piece is missing descriptor');
+    if (totalPieces === 0 || totalPieces > MAX_RPC_PIECES) throw new Error('RPC totalPieces is invalid');
+    if (pieceIdx >= totalPieces) throw new Error('RPC pieceIdx is out of range');
+    if (totalPieces === 1 && pieceIdx === 0) return { ...packet, totalPieces: 1, pieceIdx: 0 };
+
+    const key = rpcPacketStreamKey(packet);
+    if (this.currentKey !== key) {
+      this.currentKey = key;
+      this.firstPiece = undefined;
+      this.pieces = [];
+    }
+
+    if (pieceIdx === 0) this.firstPiece = packet;
+    this.pieces.length = Math.max(this.pieces.length, totalPieces);
+    this.pieces[pieceIdx] = packet;
+    this.lastUpdated = Date.now();
+
+    if (!this.firstPiece) return undefined;
+    if (this.pieces.length < totalPieces) return undefined;
+    for (let index = 0; index < totalPieces; index += 1) {
+      if (!this.pieces[index]) return undefined;
+    }
+
+    const bodyLength = this.pieces.reduce((sum, piece) => sum + (piece?.body.length ?? 0), 0);
+    const body = new Uint8Array(bodyLength);
+    let offset = 0;
+    for (const piece of this.pieces) {
+      if (!piece) continue;
+      body.set(piece.body, offset);
+      offset += piece.body.length;
+    }
+
+    return {
+      ...this.firstPiece,
+      body,
+      totalPieces: 1,
+      pieceIdx: 0,
+    };
+  }
+}
+
+export function rpcPacketMergerKey(direction: string, packet: RpcPacket): string {
+  return `${direction}:${packet.fromPeer ?? 0}:${packet.toPeer ?? 0}:${packet.transactionId?.toString() ?? ''}`;
+}
+
+function rpcPacketStreamKey(packet: RpcPacket): string {
+  return `${packet.fromPeer ?? 0}:${packet.transactionId?.toString() ?? ''}`;
+}
+
 export function decodeRpcRequest(payload: Uint8Array): RpcRequest {
   const r = new ProtoReader(payload);
   const request: RpcRequest = { request: new Uint8Array(0) };
@@ -473,27 +551,22 @@ export function encodeSyncRouteInfoRequest(request: SyncRouteInfoRequest): Uint8
   return finish(out);
 }
 
-export function buildRpcRequestPayload(request: {
-  fromPeer: number;
-  toPeer: number;
-  transactionId: bigint | number | string;
-  descriptor: RpcDescriptor;
-  requestBody: Uint8Array;
-  timeoutMs?: number;
-  traceId?: number;
-}): Uint8Array {
+export function buildRpcRequestPayload(request: BuildRpcRequestPayloadArgs): Uint8Array {
+  return buildRpcRequestPayloads(request)[0];
+}
+
+export function buildRpcRequestPayloads(request: BuildRpcRequestPayloadArgs): Uint8Array[] {
   const rpcRequest = encodeRpcRequest({ request: request.requestBody, timeoutMs: request.timeoutMs });
-  return encodeRpcPacket({
+  return buildRpcPacketPayloads({
     fromPeer: request.fromPeer,
     toPeer: request.toPeer,
     transactionId: BigInt(request.transactionId),
     descriptor: request.descriptor,
-    body: rpcRequest,
+    content: rpcRequest,
     isRequest: true,
-    totalPieces: 1,
-    pieceIdx: 0,
     traceId: request.traceId ?? 0,
     compressionInfo: { algo: CompressionAlgo.None, acceptedAlgo: CompressionAlgo.None },
+    maxPayloadSize: request.maxPayloadSize,
   });
 }
 
@@ -550,19 +623,118 @@ export function encodeRpcPacket(packet: RpcPacket): Uint8Array {
 }
 
 export function buildRpcResponsePayload(requestPacket: RpcPacket, responseBody: Uint8Array): Uint8Array {
+  return buildRpcResponsePayloads(requestPacket, responseBody)[0];
+}
+
+export function buildRpcResponsePayloads(requestPacket: RpcPacket, responseBody: Uint8Array, maxPayloadSize?: number): Uint8Array[] {
   const rpcResponse = encodeRpcResponse(responseBody);
-  return encodeRpcPacket({
+  return buildRpcPacketPayloads({
     fromPeer: EDGE_PEER_ID,
     toPeer: requestPacket.fromPeer,
     transactionId: requestPacket.transactionId,
     descriptor: requestPacket.descriptor,
-    body: rpcResponse,
+    content: rpcResponse,
     isRequest: false,
-    totalPieces: 1,
-    pieceIdx: 0,
     traceId: requestPacket.traceId ?? 0,
     compressionInfo: { algo: CompressionAlgo.None, acceptedAlgo: CompressionAlgo.None },
+    maxPayloadSize,
   });
+}
+
+function buildRpcPacketPayloads(args: {
+  fromPeer?: number;
+  toPeer?: number;
+  transactionId?: bigint;
+  descriptor?: RpcDescriptor;
+  content: Uint8Array;
+  isRequest: boolean;
+  traceId?: number;
+  compressionInfo?: RpcCompressionInfo;
+  maxPayloadSize?: number;
+}): Uint8Array[] {
+  const single = encodeRpcPacket(buildRpcPiece(args, 1, 0, args.content));
+  if (!Number.isFinite(args.maxPayloadSize) || args.maxPayloadSize === undefined || single.length <= args.maxPayloadSize) {
+    return [single];
+  }
+  const maxPayloadSize = Math.floor(args.maxPayloadSize);
+  if (maxPayloadSize <= 0) throw new RangeError('RPC payload size budget is invalid');
+  if (args.content.length === 0) throw new RangeError('RPC metadata exceeds payload budget');
+
+  const chunks: Array<[number, number]> = [];
+  let offset = 0;
+  while (offset < args.content.length) {
+    const pieceIdxForSizing = chunks.length === 0 ? 0 : MAX_RPC_PIECES - 1;
+    const len = pickRpcPieceLength(args, offset, args.content.length - offset, pieceIdxForSizing, maxPayloadSize);
+    chunks.push([offset, len]);
+    offset += len;
+    if (chunks.length > MAX_RPC_PIECES) throw new RangeError('RPC packet would require too many pieces');
+  }
+
+  const totalPieces = chunks.length;
+  return chunks.map(([start, len], pieceIdx) => encodeRpcPacket(buildRpcPiece(
+    args,
+    totalPieces,
+    pieceIdx,
+    args.content.subarray(start, start + len),
+  )));
+}
+
+function buildRpcPiece(
+  args: {
+    fromPeer?: number;
+    toPeer?: number;
+    transactionId?: bigint;
+    descriptor?: RpcDescriptor;
+    isRequest: boolean;
+    traceId?: number;
+    compressionInfo?: RpcCompressionInfo;
+  },
+  totalPieces: number,
+  pieceIdx: number,
+  body: Uint8Array,
+): RpcPacket {
+  const compressionAlgo = args.compressionInfo?.algo ?? CompressionAlgo.None;
+  return {
+    fromPeer: args.fromPeer,
+    toPeer: args.toPeer,
+    transactionId: args.transactionId,
+    descriptor: pieceIdx === 0 || compressionAlgo === CompressionAlgo.None ? args.descriptor : undefined,
+    body,
+    isRequest: args.isRequest,
+    totalPieces,
+    pieceIdx,
+    traceId: args.traceId,
+    compressionInfo: pieceIdx === 0 ? args.compressionInfo : undefined,
+  };
+}
+
+function pickRpcPieceLength(
+  args: Parameters<typeof buildRpcPacketPayloads>[0],
+  offset: number,
+  remaining: number,
+  pieceIdxForSizing: number,
+  maxPayloadSize: number,
+): number {
+  let low = 1;
+  let high = remaining;
+  let best = 0;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const candidate = encodeRpcPacket(buildRpcPiece(
+      args,
+      MAX_RPC_PIECES,
+      pieceIdxForSizing,
+      args.content.subarray(offset, offset + mid),
+    ));
+    if (candidate.length <= maxPayloadSize) {
+      best = mid;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  if (best === 0) throw new RangeError('RPC metadata exceeds payload budget');
+  return best;
 }
 
 export function natTypeName(value: number | undefined): string | undefined {
@@ -633,6 +805,7 @@ function decodeRoutePeerInfo(payload: Uint8Array): RoutePeerInfo {
   const r = new ProtoReader(payload);
   const info: RoutePeerInfo = { peerId: 0, proxyCidrs: [] };
   while (!r.done) {
+    const start = r.offset;
     const tag = r.tag();
     if (tag.field === 1 && tag.wire === 0) info.peerId = r.uint32();
     else if (tag.field === 3 && tag.wire === 0) info.cost = r.uint32();
@@ -644,9 +817,15 @@ function decodeRoutePeerInfo(payload: Uint8Array): RoutePeerInfo {
     else if (tag.field === 10 && tag.wire === 2) info.easytierVersion = r.string();
     else if (tag.field === 12 && tag.wire === 0) info.peerRouteId = r.uint64().toString();
     else if (tag.field === 13 && tag.wire === 0) info.networkLength = r.uint32();
-    else if (tag.field === 15 && tag.wire === 2) info.ipv6 = decodeIpv6Inet(r.bytes());
+    else if (tag.field === 15 && tag.wire === 2) {
+      info.ipv6 = decodeIpv6Inet(r.bytes());
+      (info.rawUnknownFields ??= []).push(r.rawFrom(start));
+    }
     else if (tag.field === 17 && tag.wire === 0) info.tcpNatType = r.uint32();
-    else r.skip(tag.wire);
+    else {
+      r.skip(tag.wire);
+      (info.rawUnknownFields ??= []).push(r.rawFrom(start));
+    }
   }
   return info;
 }
@@ -664,6 +843,9 @@ function encodeRoutePeerInfo(info: RoutePeerInfo): Uint8Array {
   writeUint64Field(out, 12, info.peerRouteId);
   writeUint32Field(out, 13, info.networkLength);
   writeUint32Field(out, 17, info.tcpNatType);
+  for (const raw of info.rawUnknownFields ?? []) {
+    for (const byte of raw) out.push(byte);
+  }
   return finish(out);
 }
 

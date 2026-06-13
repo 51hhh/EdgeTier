@@ -211,6 +211,11 @@ RelayRoom.handleRpc(session, header, payload, frame): Promise<boolean>
   Do not assume protobuf service method indexes are 0-based when generating `RpcDescriptor.methodIndex`.
 - EasyTier 2.6.4 RPC compression uses Zstd when `RpcPacket.compression_info.algo === 2`.
   Decompress `RpcPacket.body` before decoding the inner `RpcRequest`/`RpcResponse`; do not use gzip, `node:zlib`, or `DecompressionStream('gzip')` for this path.
+- EasyTier RPC packets may be fragmented with `total_pieces` / `piece_idx`.
+  Merge target-EdgeTier fragments by `{direction, from_peer, to_peer, transaction_id}` before service dispatch.
+  Continue forwarding non-target fragments unchanged so the Worker does not drop RPC pieces between real nodes.
+- Outbound RPC over EasyTier TCP tunnel must split plaintext `RpcPacket` pieces before AES-GCM encryption so each final tunnel payload remains within the 2000-byte EasyTier TCP frame limit.
+- `RoutePeerInfo` fields that EdgeTier does not model or cannot re-encode yet must be preserved as raw protobuf field bytes and appended when the Worker re-encodes route updates.
 
 ### 4. Validation & Error Matrix
 
@@ -226,6 +231,8 @@ RelayRoom.handleRpc(session, header, payload, frame): Promise<boolean>
 | `RpcPacket.compression_info.algo === 2` | Zstd-decompress `RpcPacket.body` with a Worker-compatible implementation before decoding `RpcRequest`; do not treat EasyTier RPC compression as gzip |
 | EdgeTier sends active `PeerCenterRpc.GetGlobalPeerMap` | Use `methodIndex = 2`; `methodIndex = 1` is `ReportPeers` in official 2.6.4 |
 | Unsupported compressed RPC body | Record unsupported compression; do not claim route-sync decode |
+| Fragmented RPC targets EdgeTier | Feed a per-session merger and dispatch only once all pieces are present |
+| Fragmented RPC targets another peer | Observe at most a safe summary and forward the original piece |
 | Decrypt/decode failure | Record `decode_error`/`rpc_seen`; do not throw from the WebSocket handler |
 
 ### 5. Good/Base/Bad Cases
@@ -237,6 +244,8 @@ RelayRoom.handleRpc(session, header, payload, frame): Promise<boolean>
 - Good: route update bitmap peer-id lists include PeerCenter-only peer ids, even when their hostname/IP RoutePeerInfo has not been decoded yet.
 - Good: session peer identity is established from the handshake / first non-Edge packet and later control packets cannot rebind it to `EDGE_PEER_ID`.
 - Good: a Zstd-compressed `RpcPacket.body` is decompressed with a Worker-compatible implementation before service dispatch.
+- Good: a fragmented `OspfRouteRpc.SyncRouteInfo` request is merged before route decode, and a large Worker route push is split before TCP encryption.
+- Good: unknown or not-yet-rebuilt `RoutePeerInfo` fields are retained byte-for-byte through decode/store/re-encode.
 - Base: an `RpcResp` for `OspfRouteRpc` is observed but produces no `syncRouteInfo` object.
 - Bad: treating every `OspfRouteRpc` descriptor as a request and responding to an incoming `RpcResp`.
 - Bad: using `methodIndex = 0` for official EasyTier 2.6.4 RPC calls because typical protobuf method arrays are 0-based.
@@ -251,6 +260,8 @@ RelayRoom.handleRpc(session, header, payload, frame): Promise<boolean>
 - Unit test server-pushed `SyncRouteInfoRequest` payloads round-trip through `decodeEasyTierRpcPayload`.
 - Regression test `decodeEasyTierRpcPayload` does not expose `syncRouteInfo` for `RpcPacket.is_request === false`.
 - Regression test `decodeEasyTierRpcPayload` decompresses a Zstd-compressed `RpcRequest` before `SyncRouteInfo` service decode.
+- Regression test fragmented RPC payloads split within a configured budget, merge back to one logical packet, and decode to the original service body.
+- Regression test `RoutePeerInfo` raw passthrough fields survive decode and re-encode.
 - Real traffic tests should assert decoded request peer identity fields from captured `RpcReq` vectors.
 - Regression test session peer binding ignores `EDGE_PEER_ID` and later non-matching `fromPeerId` values after the client peer has been established.
 

@@ -12,6 +12,7 @@ import {
   createOspfRouteSessionState,
   framePeerBindingCandidate,
   missingRouteInfoPeerIds,
+  outboundRoomIdsForMaintenance,
   resolveDefaultRoomConfig,
   resolveNetworkConfig,
   resolveOutboundTcpPeers,
@@ -151,6 +152,35 @@ describe('resolveOutboundTcpPeers', () => {
   it('does not start outbound TCP for script-error room ids', () => {
     expect(resolveOutboundTcpPeers({ EASYTIER_PUBLIC_PEER_TCP: 'tcp://example.com:11010' }, 'null')).toEqual([]);
     expect(resolveOutboundTcpPeers({ EASYTIER_PUBLIC_PEER_TCP: 'tcp://example.com:11010' }, 'undefined')).toEqual([]);
+    expect(resolveOutboundTcpPeers({ EASYTIER_PUBLIC_PEER_TCP: 'tcp://example.com:11010' }, '../unsafe')).toEqual([]);
+  });
+});
+
+describe('outboundRoomIdsForMaintenance', () => {
+  it('seeds the default room when a global public TCP peer is configured', () => {
+    expect(outboundRoomIdsForMaintenance({
+      EASYTIER_NETWORK_NAME: 'home-mesh',
+      EASYTIER_PUBLIC_PEER_TCP: 'tcp://example.com:11010',
+    })).toEqual(['home-mesh']);
+  });
+
+  it('keeps stored rooms only when they are valid and still have outbound peers', () => {
+    expect(outboundRoomIdsForMaintenance({
+      EASYTIER_OUTBOUND_TCP_PEERS: JSON.stringify({
+        home: 'tcp://home.example:11010',
+        lab: [],
+      }),
+    }, ['home', 'lab', '../unsafe', 'missing'])).toEqual(['home']);
+  });
+
+  it('discovers per-room outbound TCP map keys after a cold start', () => {
+    expect(outboundRoomIdsForMaintenance({
+      EASYTIER_OUTBOUND_TCP_PEERS: JSON.stringify({
+        home: 'tcp://home.example:11010',
+        lab: { peers: ['tcp://lab.example:11010'] },
+        '../unsafe': 'tcp://unsafe.example:11010',
+      }),
+    })).toEqual(['home', 'lab']);
   });
 });
 

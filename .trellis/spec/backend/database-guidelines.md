@@ -157,6 +157,7 @@ interface PersistedControlState {
     directPeers: Array<[number, { latencyMs: number }]>;
     lastSeen: string;
   }>;
+  outboundRoomIds?: string[];
 }
 ```
 
@@ -164,6 +165,7 @@ interface PersistedControlState {
 
 - Persist only observer/control-plane state that is safe for the private dashboard: route peers, route proto fields, topology edges, PeerCenter latency data, and route version.
 - Do not persist WebSocket objects, session runtime queues, AES keys, network secrets, cookies, relay tokens, raw packet bytes, or full network secret digests.
+- `outboundRoomIds` may persist only validated room ids that have configured outbound TCP peers; it exists so a Durable Object alarm can resume active TCP dialing after eviction without waiting for a dashboard/API request.
 - WebSocket sessions are runtime-only unless the code is explicitly migrated to Cloudflare WebSocket Hibernation API.
 - Durable Object alarms may send EasyTier Ping frames, close timed-out sockets, prune stale route/PeerCenter entries, and persist the pruned state.
 - Route cleanup should remove route state sourced from a disconnected peer when no live session still owns that peer.
@@ -178,12 +180,14 @@ interface PersistedControlState {
 | Route/PeerCenter entry is older than relay TTL and has no live session | Prune it and persist the pruned state |
 | RoutePeerInfo is older than relay TTL but `sourcePeerId` is still a live session | Keep it; EasyTier OSPF sends versioned deltas and may not resend unchanged peer info |
 | conn bitmap or PeerCenter references a peer without local RoutePeerInfo | Trigger a bounded OSPF route-session resync; do not leave the UI permanently on route-data-pending |
+| Stored outbound room id is invalid or no longer has outbound peers | Ignore it during maintenance alarm scheduling |
 | WebSocket is open but silent beyond heartbeat timeout after EdgeTier sent Ping | Close the socket and run normal disconnect cleanup |
 | Test seed clear is requested | Clear in-memory observer state and persist the empty control state |
 
 ### 5. Good/Base/Bad Cases
 
 - Good: persist `routePeers`, `rawRoutePeerInfos`, `connBitmapPeerIds`, `connBitmapEdges`, and PeerCenter latency maps under `control-state:v1`.
+- Good: persist validated outbound TCP room ids, not peer URIs or credentials, so alarms can redial configured public EasyTier nodes after cold start.
 - Good: rehydrate route/PeerCenter observer state after Durable Object eviction, then prune stale entries before serving snapshots.
 - Good: keep stale-looking `RoutePeerInfo` while its source peer is still connected; disconnect cleanup removes state by `sourcePeerId`.
 - Good: when topology has peer ids from conn bitmap/PeerCenter but route data is missing, rotate the local OSPF route session id and push a route update to request a full delta from the official node.
@@ -199,6 +203,7 @@ interface PersistedControlState {
 - Regression test route bitmap builders do not synthesize full-mesh edges unless observed.
 - Regression test route retention keeps RoutePeerInfo from live sources past the stale TTL.
 - Regression test missing route-info detection covers conn bitmap / PeerCenter peer ids without RoutePeerInfo.
+- Regression test outbound maintenance room selection includes configured default/per-room TCP rooms and filters invalid or unconfigured stored rooms.
 - Future integration test: persisted control state reloads after Durable Object restart and stale entries are pruned.
 - Future live validation: real node disconnect removes route/PeerCenter entries from the dashboard within the heartbeat/TTL window.
 
