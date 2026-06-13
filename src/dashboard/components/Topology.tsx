@@ -148,6 +148,7 @@ function ConnectionGraph({ topology, nodeByPeerId, t }: { topology?: TopologySna
   const svgRef = useRef<SVGSVGElement>(null);
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState({ x: 0, y: 0 });
+  const [selectedNode, setSelectedNode] = useState<number | null>(null);
 
   // Use native DOM event for wheel to bypass React's passive listener
   useEffect(() => {
@@ -207,7 +208,7 @@ function ConnectionGraph({ topology, nodeByPeerId, t }: { topology?: TopologySna
             {crossingCount > 0 && <Badge variant="beta">{crossingCount} crossings</Badge>}
           </div>
         </div>
-        <div className="topology-graph" role="img" aria-label={t('topology.connectionGraph')}>
+        <div className="topology-graph" role="img" aria-label={t('topology.connectionGraph')} onClick={() => setSelectedNode(null)}>
           <svg
             ref={svgRef}
             viewBox={`0 0 ${GRAPH_WIDTH} ${GRAPH_HEIGHT}`}
@@ -243,17 +244,27 @@ function ConnectionGraph({ topology, nodeByPeerId, t }: { topology?: TopologySna
                 const node = peerFor(peerId, nodeByPeerId);
                 const nodeColor = nodeColorForPeerId(node.peerId);
                 const r = nodeRadius(pos);
-                const tooltipLines = [
-                  peerFullLabel(node, t('common.unknownPeer')),
-                  node.udpNatType ? `UDP NAT: ${node.udpNatType}` : null,
-                  node.tcpNatType ? `TCP NAT: ${node.tcpNatType}` : null,
-                  node.virtualIpv4 ? `IP: ${node.virtualIpv4}` : null,
-                  node.easytierVersion ? `Version: ${node.easytierVersion}` : null,
-                  node.latencyMs !== undefined ? `Latency: ${node.latencyMs} ms` : null,
-                ].filter(Boolean).join(' | ');
-                return <g key={node.peerId} className="graph-node-group" transform={`translate(${pos.x} ${pos.y})`}>
-                  <title>{tooltipLines}</title>
-                  <circle className="graph-node" cx={0} cy={0} r={r} fill={nodeColor} stroke="var(--color-kumo-base)" strokeWidth={2.5} />
+                const isSelected = selectedNode === node.peerId;
+                return <g
+                  key={node.peerId}
+                  className="graph-node-group"
+                  transform={`translate(${pos.x} ${pos.y})`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setSelectedNode(prev => prev === node.peerId ? null : node.peerId);
+                  }}
+                  style={{ cursor: 'pointer' }}
+                >
+                  <title>{peerFullLabel(node, t('common.unknownPeer'))}</title>
+                  <circle
+                    className="graph-node"
+                    cx={0}
+                    cy={0}
+                    r={r}
+                    fill={nodeColor}
+                    stroke={isSelected ? '#ff0' : 'var(--color-kumo-base)'}
+                    strokeWidth={isSelected ? 4 : 2.5}
+                  />
                   <text className="graph-node-label" x={0} y={4}>{shortPeerId(node.peerId)}</text>
                   <text className="graph-node-host-label" x={0} y={r + 16}>{compactPeerDisplayName(node, t('common.routeDataPending'))}</text>
                 </g>;
@@ -265,6 +276,22 @@ function ConnectionGraph({ topology, nodeByPeerId, t }: { topology?: TopologySna
             <button type="button" onClick={() => setTransform(prev => ({ ...prev, scale: Math.max(0.5, prev.scale / 1.2) }))} title="Zoom Out">−</button>
             <button type="button" onClick={handleDoubleClick} title="Reset View">⟲</button>
           </div>
+          {selectedNode !== null && (() => {
+            const node = peerFor(selectedNode, nodeByPeerId);
+            return <div className="node-info-popup">
+              <div className="node-info-header">
+                <strong>{peerFullLabel(node, t('common.unknownPeer'))}</strong>
+                <button onClick={() => setSelectedNode(null)} aria-label="Close">×</button>
+              </div>
+              <div className="node-info-content">
+                {node.udpNatType && <div><strong>UDP NAT:</strong> {node.udpNatType}</div>}
+                {node.tcpNatType && <div><strong>TCP NAT:</strong> {node.tcpNatType}</div>}
+                {node.virtualIpv4 && <div><strong>IP:</strong> {node.virtualIpv4}</div>}
+                {node.easytierVersion && <div><strong>Version:</strong> {node.easytierVersion}</div>}
+                {node.latencyMs !== undefined && <div><strong>Latency:</strong> {node.latencyMs} ms</div>}
+              </div>
+            </div>;
+          })()}
         </div>
         <div className="chart-legend">
           <span><i className="legend-swatch bitmap" />{t('topology.source.conn_bitmap')}</span>
