@@ -98,9 +98,20 @@ export interface TopologyEdge {
   latencyMs?: number;
 }
 
+export interface TopologySummary {
+  nodeCount: number;
+  edgeCount: number;
+  connBitmapEdgeCount: number;
+  peerCenterEdgeCount: number;
+  latencyEdgeCount: number;
+  averageLatencyMs?: number;
+  peerCenterRatio?: number;
+}
+
 export interface TopologySnapshot {
   roomId: string;
   nodes: RoutePeerSnapshot[];
   edges: TopologyEdge[];
+  summary: TopologySummary;
   updatedAt?: string;
 }

@@ -71,7 +71,7 @@ export function ConfigGenerator() {
           <Switch label="DHCP" checked={options.dhcp} onClick={() => update({ dhcp: !options.dhcp })} />
           <Switch label="no_listener (recommended for clients)" checked={options.noListener} onClick={() => update({ noListener: !options.noListener })} />
         </div>
-        <Text as="p" variant="secondary" size="sm">This form does not upload the secret. The deployed Worker must be configured separately with the matching EASYTIER_NETWORK_SECRET secret.</Text>
+        <Text as="p" variant="secondary" size="sm">This form does not upload the secret. Configure the deployed Worker with EASYTIER_NETWORKS, EASYTIER_NETWORK_SECRETS, or the matching EASYTIER_NETWORK_SECRET secret.</Text>
       </LayerCard.Primary>
     </LayerCard>
 

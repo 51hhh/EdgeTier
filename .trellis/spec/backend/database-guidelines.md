@@ -118,6 +118,106 @@ const summaries = markRoomActivity([...rooms.values()]);
 
 ---
 
+## Scenario: Durable Object Storage for Relay Control-Plane Observer State
+
+### 1. Scope / Trigger
+
+- Trigger: Persisting EasyTier route/topology/PeerCenter observer state or adding Durable Object alarms for relay cleanup.
+- Applies to `src/durable-objects/relay-room.ts`, `src/observer/types.ts`, and dashboard topology consumers.
+
+### 2. Signatures
+
+Storage key:
+
+```text
+control-state:v1
+```
+
+RelayRoom methods:
+
+```typescript
+RelayRoom.alarm(): Promise<void>
+loadControlState(): Promise<void>
+persistControlState(): Promise<void>
+ensureMaintenanceAlarm(): Promise<void>
+```
+
+Persisted shape:
+
+```typescript
+interface PersistedControlState {
+  routeVersion: number;
+  topologyUpdatedAt?: string;
+  routePeers: RoutePeerSnapshot[];
+  rawRoutePeerInfos: RoutePeerInfo[];
+  connBitmapEdges: TopologyEdge[];
+  peerCenter: Array<{
+    peerId: number;
+    directPeers: Array<[number, { latencyMs: number }]>;
+    lastSeen: string;
+  }>;
+}
+```
+
+### 3. Contracts
+
+- Persist only observer/control-plane state that is safe for the private dashboard: route peers, route proto fields, topology edges, PeerCenter latency data, and route version.
+- Do not persist WebSocket objects, session runtime queues, AES keys, network secrets, cookies, relay tokens, raw packet bytes, or full network secret digests.
+- WebSocket sessions are runtime-only unless the code is explicitly migrated to Cloudflare WebSocket Hibernation API.
+- Durable Object alarms may send EasyTier Ping frames, close timed-out sockets, prune stale route/PeerCenter entries, and persist the pruned state.
+- Route cleanup should remove route state sourced from a disconnected peer when no live session still owns that peer.
+
+### 4. Validation & Error Matrix
+
+| Condition | Behavior |
+|---|---|
+| Stored control state missing | Start with empty in-memory route/topology state |
+| Stored route peer has invalid `peerId` | Drop that entry during load |
+| Stored PeerCenter latency is non-finite | Drop that direct-peer entry during load |
+| Route/PeerCenter entry is older than relay TTL and has no live session | Prune it and persist the pruned state |
+| WebSocket is open but silent beyond heartbeat timeout after EdgeTier sent Ping | Close the socket and run normal disconnect cleanup |
+| Test seed clear is requested | Clear in-memory observer state and persist the empty control state |
+
+### 5. Good/Base/Bad Cases
+
+- Good: persist `routePeers`, `rawRoutePeerInfos`, `connBitmapEdges`, and PeerCenter latency maps under `control-state:v1`.
+- Good: rehydrate route/PeerCenter observer state after Durable Object eviction, then prune stale entries before serving snapshots.
+- Base: after a cold start with no persisted state, `/api/rooms/:id/topology` returns empty nodes/edges plus a zero summary.
+- Bad: storing `DerivedKeys`, `networkSecret`, WebSocket handles, raw packet payloads, or full digests in Durable Object storage.
+- Bad: treating persisted route state as proof of live WebSocket connectivity.
+
+### 6. Tests Required
+
+- Unit test config/storage helper behavior when exposed as pure functions.
+- Unit test topology summary fields when DTO shape changes.
+- Regression test route bitmap builders do not synthesize full-mesh edges unless observed.
+- Future integration test: persisted control state reloads after Durable Object restart and stale entries are pruned.
+- Future live validation: real node disconnect removes route/PeerCenter entries from the dashboard within the heartbeat/TTL window.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```typescript
+await state.storage.put('session', { ws, keys, networkSecret });
+```
+
+#### Correct
+
+```typescript
+await state.storage.put('control-state:v1', {
+  routeVersion,
+  routePeers: [...routePeers.values()],
+  rawRoutePeerInfos: [...rawRoutePeerInfos.values()],
+  connBitmapEdges,
+  peerCenter: serializePeerCenter(peerCenter),
+});
+```
+
+Durable Object storage keeps safe observer state only. Live sockets and secrets remain runtime-only.
+
+---
+
 ## Query Patterns
 
 No ORM/query library is used. Durable Object storage calls should stay local and simple:

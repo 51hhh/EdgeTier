@@ -13,24 +13,28 @@ function sourceLabel(source: TopologyEdge['source']): string {
 export function Topology({ topology }: TopologyProps) {
   const nodes = topology?.nodes ?? [];
   const edges = topology?.edges ?? [];
-  const latencyEdges = edges.filter((edge) => edge.latencyMs !== undefined);
-  const connBitmapEdges = edges.filter((edge) => edge.source === 'conn_bitmap');
-  const peerCenterEdges = edges.filter((edge) => edge.source === 'peer_center');
-  const p2pRatio = edges.length === 0 ? 'unknown' : `${Math.round((peerCenterEdges.length / edges.length) * 100)}%`;
+  const summary = topology?.summary ?? {
+    nodeCount: nodes.length,
+    edgeCount: edges.length,
+    connBitmapEdgeCount: edges.filter((edge) => edge.source === 'conn_bitmap').length,
+    peerCenterEdgeCount: edges.filter((edge) => edge.source === 'peer_center').length,
+    latencyEdgeCount: edges.filter((edge) => edge.latencyMs !== undefined).length,
+  };
+  const p2pRatio = summary.peerCenterRatio === undefined ? 'unknown' : `${Math.round(summary.peerCenterRatio * 100)}%`;
 
   return <div className="stack">
     <section className="grid cards" aria-label="topology metrics">
       <LayerCard>
         <LayerCard.Secondary>Nodes</LayerCard.Secondary>
-        <LayerCard.Primary><Text as="strong" variant="heading2">{nodes.length}</Text></LayerCard.Primary>
+        <LayerCard.Primary><Text as="strong" variant="heading2">{summary.nodeCount}</Text></LayerCard.Primary>
       </LayerCard>
       <LayerCard>
         <LayerCard.Secondary>Edges</LayerCard.Secondary>
-        <LayerCard.Primary><Text as="strong" variant="heading2">{edges.length}</Text></LayerCard.Primary>
+        <LayerCard.Primary><Text as="strong" variant="heading2">{summary.edgeCount}</Text></LayerCard.Primary>
       </LayerCard>
       <LayerCard>
         <LayerCard.Secondary>Latency edges</LayerCard.Secondary>
-        <LayerCard.Primary><Text as="strong" variant="heading2">{latencyEdges.length}</Text></LayerCard.Primary>
+        <LayerCard.Primary><Text as="strong" variant="heading2">{summary.latencyEdgeCount}</Text></LayerCard.Primary>
       </LayerCard>
       <LayerCard>
         <LayerCard.Secondary>PeerCenter ratio</LayerCard.Secondary>
@@ -41,11 +45,11 @@ export function Topology({ topology }: TopologyProps) {
     <section className="grid">
       <LayerCard>
         <LayerCard.Secondary>conn bitmap</LayerCard.Secondary>
-        <LayerCard.Primary><Text as="p" variant="secondary">{connBitmapEdges.length} route topology edge(s)</Text></LayerCard.Primary>
+        <LayerCard.Primary><Text as="p" variant="secondary">{summary.connBitmapEdgeCount} route topology edge(s)</Text></LayerCard.Primary>
       </LayerCard>
       <LayerCard>
         <LayerCard.Secondary>PeerCenter</LayerCard.Secondary>
-        <LayerCard.Primary><Text as="p" variant="secondary">{peerCenterEdges.length} direct latency edge(s)</Text></LayerCard.Primary>
+        <LayerCard.Primary><Text as="p" variant="secondary">{summary.peerCenterEdgeCount} direct latency edge(s){summary.averageLatencyMs === undefined ? '' : `; average ${summary.averageLatencyMs} ms`}</Text></LayerCard.Primary>
       </LayerCard>
     </section>
 

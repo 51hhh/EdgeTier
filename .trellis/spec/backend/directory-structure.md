@@ -59,6 +59,9 @@ GET /api/rooms/:roomId                      # full room snapshot
 GET /api/rooms/:roomId/peers                # peer list
 GET /api/rooms/:roomId/events               # recent event list
 GET /api/rooms/:roomId/traffic              # room traffic counters
+GET /api/rooms/:roomId/topology             # route/PeerCenter topology snapshot
+POST /api/rooms/:roomId/token               # issue short-lived room-scoped WSS token
+POST /api/rooms/:roomId/test-seed           # auth-guarded synthetic observer data for dashboard verification
 GET /dashboard                              # redirects to /dashboard/
 ```
 
@@ -70,6 +73,8 @@ RelayRoom.fetch("/?room=<room>")            # RoomSnapshot JSON
 RelayRoom.fetch("/peers?room=<room>")       # { peers }
 RelayRoom.fetch("/events?room=<room>")      # { events }
 RelayRoom.fetch("/traffic?room=<room>")     # TrafficSnapshot JSON
+RelayRoom.fetch("/topology?room=<room>")    # TopologySnapshot JSON
+RelayRoom.fetch("/test-seed?room=<room>")   # synthetic observer data mutation, auth guarded upstream
 
 Directory.fetch("/", GET)                   # { rooms }
 Directory.fetch("/", POST RoomSummary)      # persists/upserts summary
@@ -106,6 +111,19 @@ networkName + networkSecretDigest
 ```
 
 Never expose the full network secret digest. Use an opaque room id or short digest prefix only.
+
+EasyTier network secret configuration:
+
+```text
+EASYTIER_NETWORK_SECRET                      # fallback single-network secret
+EASYTIER_NETWORK_NAME                        # fallback expected network name; defaults to room id
+EASYTIER_NETWORK_SECRETS                     # JSON object keyed by room id or network name, value is secret
+EASYTIER_NETWORKS                            # JSON object keyed by room id; value is secret string or { networkName, secret }
+```
+
+`EASYTIER_NETWORKS` takes precedence for network name selection. If its room entry omits `secret`, the relay falls back to
+`EASYTIER_NETWORK_SECRETS[roomId]`, then `EASYTIER_NETWORK_SECRETS[networkName]`, then `EASYTIER_NETWORK_SECRET`.
+Secrets must be configured as Worker secrets or gitignored local env values; never commit real values.
 
 EasyTier packet header contract:
 

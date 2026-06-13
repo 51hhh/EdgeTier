@@ -6,6 +6,12 @@
 
 日期:2026-06-12
 
+实施状态补充(2026-06-13):Phase A/B 已在 EdgeTier 实现并用真机向量及部署版 `8e2be8b0-7244-47b5-852f-dbd0b4ce36a3`
+验证核心握手、解密、SyncRouteInfo 解码、真实 `home-mesh` RoutePeerInfo/conn bitmap/PeerCenter topology;
+Phase C/D 的 Worker-feasible 部分已接入 route push/broadcast、PeerCenter 响应/聚合、DO storage/alarms cleanup、
+topology summary DTO 与面板。剩余工作是压缩 route 表真机向量、断线 cleanup/长测、DO 重启/休眠证据、per-room secret 部署验证;
+出站 TCP `connect()` 暂未实现,因官方 TCP 帧/lifecycle 尚未形成可安全测试闭环。
+
 ## 1. 结论:可行,且有现成先例
 
 可行性已被现成代码证明,无需从零逆向:
@@ -72,18 +78,19 @@ WebCrypto + EdgeTier 现有鉴权/观测/面板,而不是从零逆向。EdgeTier
   - 移植 `crypto.ts`(SipHash KDF + AES-GCM)、`packet` 头(已有)、handshake(type=2)解析与应答。
   - 验收:真实 easytier-core/GUI 节点能与 EdgeTier 完成 WSS 握手(`research/github/EasyTier` 自建节点,或你提供的机器)。
 
-- **Phase B — 解密 + RPC 解码(只读观测)**
+- **Phase B — 解密 + RPC 解码(只读观测) [已实现并部署验证;压缩 route 表待向量]**
   - 用派生密钥解 AES-GCM;解 `RpcPacket → RpcRequest`;解 `SyncRouteInfo` / `PeerCenter`。
   - 把解出的 `RoutePeerInfo`(虚拟 IP/hostname/NAT/版本)、conn bitmap、global peer map 汇总进 observer 状态。
   - 验收:dashboard **设备页显示真实虚拟 IP/hostname/NAT/延迟**,替换当前"待 v0.1.3"占位与 seed 假数据。
 
-- **Phase C — 做合格 shared node(让真实节点稳定挂靠)**
+- **Phase C — 做合格 shared node(让真实节点稳定挂靠) [Worker-feasible 已接入并部署验证;断线/长测待补]**
   - 正确应答 SyncRouteInfo / PeerCenter,推送/广播路由更新,使节点保持连接、组网收敛。
-  - 解决 DO hibernation 与"幽灵节点"(心跳/超时/单调版本号 —— 先例 README 有专门方案)。
+  - 解决幽灵节点:DO alarm 心跳/超时、单调 routeVersion、断线清理该来源 route/PeerCenter 状态并广播。
+  - 说明:route push 的 conn bitmap 只包含观测到的边和 EdgeTier↔live peer 边,不伪造成全 mesh。
   - 验收:节点把 EdgeTier 当 peer 长期在线,断线秒级反映。
 
-- **Phase D — 拓扑与延迟可视化(超出当前)**
-  - conn bitmap → 拓扑图;global peer map → 延迟图 + P2P/relay 成功率;路由更新事件流。
+- **Phase D — 拓扑与延迟可视化 [DTO/API/页面已接入并部署验证]**
+  - conn bitmap → 拓扑图;global peer map → 延迟图 + PeerCenter ratio summary;路由更新事件流。
   - 新增 `GET /api/rooms/:id/topology`,面板出拓扑页。
 
 ## 5. 复用映射(EdgeTier ← 先例)
@@ -105,7 +112,7 @@ WebCrypto + EdgeTier 现有鉴权/观测/面板,而不是从零逆向。EdgeTier
 
 ## 7. 建议下一步
 
-1. 你确认第 3 节的 secret/边界决策。
-2. 我在 `research/github/EasyTier` 选定一个与你 GUI(2.6.4)匹配的 tag,锁定 proto。
-3. 跑 Phase A:用本地自建 easytier 节点或你提供的机器,验证与 EdgeTier 握手成功。
-4. 逐阶段推进 B/C/D,每阶段以"真实节点 + 面板真实数据"为验收。
+1. 用 ≥2 个真实 easytier-core 2.6.4 节点补压缩 route 表真机向量、route push/broadcast 长测、断线 cleanup。
+2. 验证 DO 重启/休眠后 route/PeerCenter 观测状态可恢复或可重建;如需要恢复 socket attachment,再评估 WebSocket Hibernation API 迁移。
+3. 部署 `EASYTIER_NETWORKS`/`EASYTIER_NETWORK_SECRETS` Worker secrets,验证多 room 多 network 隔离。
+4. W5 outbound TCP 保持 future work,仅在 TCP 帧格式/lifecycle 与 Worker `connect()` 测试闭环清楚后实现。

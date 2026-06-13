@@ -24,7 +24,7 @@ import {
   type RoutePeerInfo,
   type SyncRouteInfoRequest,
 } from '../easytier/rpc';
-import type { PeerSnapshot, RelayEvent, RoomSnapshot, RoutePeerSnapshot, TopologyEdge, TopologySnapshot, TrafficSnapshot } from '../observer/types';
+import type { PeerSnapshot, RelayEvent, RoomSnapshot, RoutePeerSnapshot, TopologyEdge, TopologySnapshot, TopologySummary, TrafficSnapshot } from '../observer/types';
 import type { Env } from '../worker/env';
 
 type Session = PeerSnapshot & {
@@ -35,12 +35,40 @@ type Session = PeerSnapshot & {
   serverSessionId?: bigint;
   handshakeAccepted?: boolean;
   lastRoutePushAt?: number;
+  lastPingSent: number;
+  lastPongReceived: number;
   ospfDescriptor?: DecodedEasyTierRpc['descriptor'];
 };
 
+export interface NetworkConfig {
+  networkName: string;
+  secret?: string;
+}
+
+interface PersistedPeerCenterEntry {
+  peerId: number;
+  directPeers: Array<[number, DirectConnectedPeerInfo]>;
+  lastSeen: string;
+}
+
+interface PersistedControlState {
+  routeVersion: number;
+  topologyUpdatedAt?: string;
+  routePeers: RoutePeerSnapshot[];
+  rawRoutePeerInfos: RoutePeerInfo[];
+  connBitmapEdges: TopologyEdge[];
+  peerCenter: PersistedPeerCenterEntry[];
+}
+
 const DIRECTORY_SYNC_MIN_MS = 5_000;
+const CONTROL_STATE_PERSIST_MIN_MS = 2_000;
 const ROUTE_PUSH_MIN_MS = 10_000;
 const ROUTE_STATE_TTL_MS = 180_000;
+const HEARTBEAT_INTERVAL_MS = 10_000;
+const CONNECTION_TIMEOUT_MS = 25_000;
+const MAINTENANCE_ALARM_MS = 5_000;
+const CONTROL_STATE_STORAGE_KEY = 'control-state:v1';
+const WS_OPEN = 1;
 
 export class RelayRoom implements DurableObject {
   private sessions = new Map<string, Session>();
@@ -57,8 +85,15 @@ export class RelayRoom implements DurableObject {
   private traffic: TrafficSnapshot = { rxBytes: 0, txBytes: 0, rxPackets: 0, txPackets: 0, forwardedPackets: 0, unroutablePackets: 0, invalidPackets: 0 };
   private lastDirectorySync = 0;
   private directorySyncQueued = false;
+  private lastControlStatePersist = 0;
+  private controlStatePersistQueued = false;
 
-  constructor(private readonly state: DurableObjectState, private readonly env: Env) {}
+  constructor(private readonly state: DurableObjectState, private readonly env: Env) {
+    this.state.blockConcurrencyWhile(async () => {
+      await this.loadControlState();
+      await this.ensureMaintenanceAlarm();
+    });
+  }
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
@@ -72,6 +107,17 @@ export class RelayRoom implements DurableObject {
     return Response.json(this.snapshot(roomId));
   }
 
+  async alarm(): Promise<void> {
+    const roomId = this.currentRoomId();
+    const pruned = this.pruneStaleRouteState();
+    this.runHeartbeatMaintenance();
+    if (pruned) {
+      await this.persistControlState();
+      if (roomId) await this.syncDirectory(roomId);
+    }
+    await this.ensureMaintenanceAlarm();
+  }
+
   private acceptWebSocket(request: Request, roomId: string): Response {
     if (this.sessions.size >= MAX_PEERS_PER_ROOM) {
       this.addEvent(roomId, 'limit_exceeded', 'room peer limit exceeded');
@@ -83,6 +129,7 @@ export class RelayRoom implements DurableObject {
     server.accept();
     server.binaryType = 'arraybuffer';
     const now = new Date().toISOString();
+    const nowMs = Date.now();
     const session: Session = {
       sessionId: crypto.randomUUID(),
       roomId,
@@ -96,6 +143,8 @@ export class RelayRoom implements DurableObject {
       invalidPackets: 0,
       ws: server,
       messageQueue: Promise.resolve(),
+      lastPingSent: 0,
+      lastPongReceived: nowMs,
     };
     this.sessions.set(session.sessionId, session);
     this.addEvent(roomId, 'connected', 'websocket connected', session);
@@ -103,6 +152,7 @@ export class RelayRoom implements DurableObject {
     server.addEventListener('message', (event) => this.enqueueMessage(session, event));
     server.addEventListener('close', () => this.disconnect(session));
     server.addEventListener('error', () => this.disconnect(session));
+    this.state.waitUntil(this.ensureMaintenanceAlarm());
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -129,14 +179,19 @@ export class RelayRoom implements DurableObject {
     if (!header || !payloadLengthMatches(frame, header)) return this.invalid(session, 'invalid EasyTier packet header or length');
     session.rxPackets += 1;
     this.traffic.rxPackets += 1;
-    if (header.fromPeerId) this.bindPeer(session, header.fromPeerId);
+    this.bindPeerFromFrame(session, header);
     const payload = new Uint8Array(frame, EASYTIER_HEADER_SIZE);
     if (header.packetType === EasyTierPacketType.HandShake) {
       await this.handleHandshake(session, header, payload, frame);
       return;
     }
     if (header.packetType === EasyTierPacketType.Ping) {
+      session.lastPongReceived = Date.now();
       this.sendFrame(session, header.fromPeerId, EasyTierPacketType.Pong, payload);
+      return;
+    }
+    if (header.packetType === EasyTierPacketType.Pong) {
+      session.lastPongReceived = Date.now();
       return;
     }
     if (header.packetType === EasyTierPacketType.RpcReq || header.packetType === EasyTierPacketType.RpcResp) {
@@ -157,7 +212,18 @@ export class RelayRoom implements DurableObject {
       return;
     }
 
-    this.bindPeer(session, clientReq.myPeerId || header.fromPeerId);
+    const clientPeerId = clientReq.myPeerId || header.fromPeerId;
+    if (!clientPeerId) {
+      this.addEvent(session.roomId, 'decode_error', 'handshake missing peer id', session);
+      session.ws.close(1008, 'missing peer id');
+      return;
+    }
+    if (clientPeerId === EDGE_PEER_ID) {
+      this.addEvent(session.roomId, 'decode_error', 'handshake peer id conflicts with EdgeTier peer id', session);
+      session.ws.close(1008, 'peer id conflict');
+      return;
+    }
+    this.bindPeer(session, clientPeerId);
     session.networkName = clientReq.networkName || session.networkName;
     session.networkSecretDigestPrefix = hex(clientReq.networkSecretDigest).slice(0, 12) || undefined;
 
@@ -167,26 +233,25 @@ export class RelayRoom implements DurableObject {
       return;
     }
 
-    const networkName = this.expectedNetworkName(session.roomId);
-    const networkSecret = this.networkSecretFor(session.roomId, networkName);
-    if (clientReq.networkName !== networkName) {
+    const networkConfig = this.networkConfigFor(session.roomId);
+    if (clientReq.networkName !== networkConfig.networkName) {
       this.addEvent(session.roomId, 'decode_error', `handshake network mismatch for ${clientReq.networkName || 'unknown'}`, session);
       session.ws.close(1008, 'network mismatch');
       return;
     }
-    if (!networkSecret) {
+    if (!networkConfig.secret) {
       this.addEvent(session.roomId, 'handshake_seen', 'handshake observed; network secret is not configured', session);
       return;
     }
 
-    const response = buildHandshakeResponse(clientReq, networkName, networkSecret);
+    const response = buildHandshakeResponse(clientReq, networkConfig.networkName, networkConfig.secret);
     if (!bytesEqual(clientReq.networkSecretDigest, response.networkSecretDigest)) {
       this.addEvent(session.roomId, 'decode_error', 'handshake secret digest mismatch', session);
       session.ws.close(1008, 'network secret mismatch');
       return;
     }
 
-    session.keys = deriveKeys(networkSecret);
+    session.keys = deriveKeys(networkConfig.secret);
     session.handshakeAccepted = true;
     session.serverSessionId = session.serverSessionId ?? randomU64();
     this.sendFrame(session, clientReq.myPeerId, EasyTierPacketType.HandShake, encodeHandshake(response));
@@ -350,6 +415,7 @@ export class RelayRoom implements DurableObject {
     if (changed) this.routeVersion += 1;
     this.topologyUpdatedAt = now;
     this.queueDirectorySync(session.roomId);
+    this.queueControlStatePersist();
     return changed;
   }
 
@@ -382,7 +448,7 @@ export class RelayRoom implements DurableObject {
       mySessionId: session.serverSessionId,
       isInitiator: false,
       peerInfos,
-      connBitmap: peerIds.length > 0 ? fullMeshConnBitmap(peerIds, this.routeVersion) : undefined,
+      connBitmap: peerIds.length > 0 ? buildRouteConnBitmapForUpdate(peerIds, this.routeVersion, this.connBitmapEdges, new Set(this.peers.keys())) : undefined,
     };
   }
 
@@ -411,6 +477,7 @@ export class RelayRoom implements DurableObject {
     this.peerCenterEdges = edgesFromPeerCenter(this.peerCenter);
     this.topologyUpdatedAt = now;
     this.queueDirectorySync(session.roomId);
+    this.queueControlStatePersist();
   }
 
   private applyPeerCenterGlobalMap(session: Session, globalPeerMap: PeerCenterGlobalMap): void {
@@ -421,6 +488,7 @@ export class RelayRoom implements DurableObject {
     this.peerCenterEdges = edgesFromPeerCenter(this.peerCenter);
     this.topologyUpdatedAt = now;
     this.queueDirectorySync(session.roomId);
+    this.queueControlStatePersist();
   }
 
   private buildPeerCenterGlobalMap(): PeerCenterGlobalMap {
@@ -460,6 +528,11 @@ export class RelayRoom implements DurableObject {
     this.peers.set(peerId, session.sessionId);
   }
 
+  private bindPeerFromFrame(session: Session, header: EasyTierPacketHeader): void {
+    const candidate = framePeerBindingCandidate(session.peerId, header.fromPeerId);
+    if (candidate !== undefined) this.bindPeer(session, candidate);
+  }
+
   private invalid(session: Session, message: string): void {
     session.invalidPackets += 1;
     this.traffic.invalidPackets += 1;
@@ -470,12 +543,24 @@ export class RelayRoom implements DurableObject {
 
   private disconnect(session: Session): void {
     if (!this.sessions.has(session.sessionId)) return;
+    const peerId = session.peerId;
     this.sessions.delete(session.sessionId);
-    if (session.peerId && this.peers.get(session.peerId) === session.sessionId) this.peers.delete(session.peerId);
-    if (session.peerId) this.removePeerCenterPeer(session.peerId);
+    if (peerId && this.peers.get(peerId) === session.sessionId) this.peers.delete(peerId);
+    const peerCenterChanged = peerId ? this.removePeerCenterPeer(peerId) : false;
+    const routeStateChanged = peerId ? this.removeRouteStateForSource(peerId) : false;
+    const topologyChanged = peerCenterChanged || routeStateChanged;
     session.connected = false;
     this.addEvent(session.roomId, 'disconnected', 'websocket disconnected', session);
+    if (topologyChanged) {
+      this.routeVersion += 1;
+      this.topologyUpdatedAt = new Date().toISOString();
+      this.queueControlStatePersist(true);
+      this.state.waitUntil(this.broadcastRouteUpdates(session, session.ospfDescriptor).catch(() => {
+        this.addEvent(session.roomId, 'decode_error', 'route cleanup broadcast failed', session);
+      }));
+    }
     this.queueDirectorySync(session.roomId, true);
+    this.state.waitUntil(this.ensureMaintenanceAlarm());
   }
 
   private addEvent(roomId: string, type: RelayEvent['type'], message: string, session?: Session): void {
@@ -495,6 +580,7 @@ export class RelayRoom implements DurableObject {
       this.topologyUpdatedAt = undefined;
       this.events = [];
       this.traffic = { rxBytes: 0, txBytes: 0, rxPackets: 0, txPackets: 0, forwardedPackets: 0, unroutablePackets: 0, invalidPackets: 0 };
+      this.queueControlStatePersist(true);
       this.queueDirectorySync(roomId, true);
       return Response.json({ ok: true, cleared: true });
     }
@@ -537,8 +623,20 @@ export class RelayRoom implements DurableObject {
   }
 
   private snapshot(roomId: string): RoomSnapshot {
-    this.pruneStaleRouteState();
-    const livePeers = [...this.sessions.values()].map(({ ws: _ws, invalidPackets: _invalidPackets, messageQueue: _messageQueue, keys: _keys, serverSessionId: _serverSessionId, handshakeAccepted: _handshakeAccepted, ...peer }) => peer);
+    if (this.pruneStaleRouteState()) this.queueControlStatePersist();
+    const livePeers = [...this.sessions.values()].map(({
+      ws: _ws,
+      invalidPackets: _invalidPackets,
+      messageQueue: _messageQueue,
+      keys: _keys,
+      serverSessionId: _serverSessionId,
+      handshakeAccepted: _handshakeAccepted,
+      lastRoutePushAt: _lastRoutePushAt,
+      lastPingSent: _lastPingSent,
+      lastPongReceived: _lastPongReceived,
+      ospfDescriptor: _ospfDescriptor,
+      ...peer
+    }) => peer);
     const livePeerIds = new Set(livePeers.map((peer) => peer.peerId).filter((peerId): peerId is number => peerId !== undefined));
     const routeOnlyPeers: PeerSnapshot[] = [...this.routePeers.values()]
       .filter((peer) => !livePeerIds.has(peer.peerId))
@@ -596,7 +694,7 @@ export class RelayRoom implements DurableObject {
   }
 
   private snapshotTopology(roomId: string): TopologySnapshot {
-    this.pruneStaleRouteState();
+    if (this.pruneStaleRouteState()) this.queueControlStatePersist();
     const nodes = new Map<number, RoutePeerSnapshot>();
     for (const peer of this.routePeers.values()) nodes.set(peer.peerId, peer);
     if (this.hasObservedNetworkState()) {
@@ -617,10 +715,14 @@ export class RelayRoom implements DurableObject {
       }
     }
 
+    const sortedNodes = [...nodes.values()].sort((a, b) => a.peerId - b.peerId);
+    const edges = mergeTopologyEdges(this.connBitmapEdges, this.peerCenterEdges);
+
     return {
       roomId,
-      nodes: [...nodes.values()].sort((a, b) => a.peerId - b.peerId),
-      edges: mergeTopologyEdges(this.connBitmapEdges, this.peerCenterEdges),
+      nodes: sortedNodes,
+      edges,
+      summary: buildTopologySummary(sortedNodes, edges),
       ...(this.topologyUpdatedAt ? { updatedAt: this.topologyUpdatedAt } : {}),
     };
   }
@@ -629,22 +731,38 @@ export class RelayRoom implements DurableObject {
     return this.sessions.size > 0 || this.routePeers.size > 0 || this.peerCenter.size > 0;
   }
 
+  private networkConfigFor(roomId: string): NetworkConfig {
+    return resolveNetworkConfig(this.env, roomId);
+  }
+
   private expectedNetworkName(roomId: string): string {
-    return this.env.EASYTIER_NETWORK_NAME || roomId;
+    return this.networkConfigFor(roomId).networkName;
   }
 
-  private networkSecretFor(roomId: string, networkName: string): string | undefined {
-    const mapped = parseNetworkSecretMap(this.env.EASYTIER_NETWORK_SECRETS);
-    return mapped.get(networkName) ?? mapped.get(roomId) ?? this.env.EASYTIER_NETWORK_SECRET;
-  }
-
-  private removePeerCenterPeer(peerId: number): void {
-    this.peerCenter.delete(peerId);
-    for (const info of this.peerCenter.values()) info.directPeers.delete(peerId);
+  private removePeerCenterPeer(peerId: number): boolean {
+    let changed = this.peerCenter.delete(peerId);
+    for (const info of this.peerCenter.values()) {
+      if (info.directPeers.delete(peerId)) changed = true;
+    }
     this.peerCenterEdges = edgesFromPeerCenter(this.peerCenter);
+    return changed;
   }
 
-  private pruneStaleRouteState(now = Date.now()): void {
+  private removeRouteStateForSource(peerId: number): boolean {
+    let changed = false;
+    for (const [routePeerId, peer] of this.routePeers.entries()) {
+      if (this.peers.has(routePeerId)) continue;
+      if (routePeerId === peerId || peer.sourcePeerId === peerId) {
+        this.routePeers.delete(routePeerId);
+        this.rawRoutePeerInfos.delete(routePeerId);
+        changed = true;
+      }
+    }
+    if (changed) this.pruneTopologyEdgesToKnownPeers();
+    return changed;
+  }
+
+  private pruneStaleRouteState(now = Date.now()): boolean {
     let changed = false;
     for (const [peerId, peer] of this.routePeers.entries()) {
       if (this.peers.has(peerId)) continue;
@@ -675,7 +793,116 @@ export class RelayRoom implements DurableObject {
         }
       }
       this.peerCenterEdges = edgesFromPeerCenter(this.peerCenter);
+      this.pruneTopologyEdgesToKnownPeers();
+      this.routeVersion += 1;
+      this.topologyUpdatedAt = new Date(now).toISOString();
     }
+    return changed;
+  }
+
+  private pruneTopologyEdgesToKnownPeers(): void {
+    const known = new Set<number>([EDGE_PEER_ID]);
+    for (const peerId of this.peers.keys()) known.add(peerId);
+    for (const peerId of this.routePeers.keys()) known.add(peerId);
+    for (const peerId of this.peerCenter.keys()) known.add(peerId);
+    for (const info of this.peerCenter.values()) {
+      for (const peerId of info.directPeers.keys()) known.add(peerId);
+    }
+    this.connBitmapEdges = this.connBitmapEdges.filter((edge) => known.has(edge.fromPeerId) && known.has(edge.toPeerId));
+    this.peerCenterEdges = this.peerCenterEdges.filter((edge) => known.has(edge.fromPeerId) && known.has(edge.toPeerId));
+  }
+
+  private runHeartbeatMaintenance(now = Date.now()): void {
+    for (const session of [...this.sessions.values()]) {
+      if (session.ws.readyState !== WS_OPEN) {
+        this.disconnect(session);
+        continue;
+      }
+
+      const lastSeen = Date.parse(session.lastSeen);
+      if (session.peerId && session.lastPingSent > 0 && Number.isFinite(lastSeen) && now - lastSeen > CONNECTION_TIMEOUT_MS) {
+        this.addEvent(session.roomId, 'disconnected', 'websocket heartbeat timeout', session);
+        session.ws.close(1001, 'heartbeat timeout');
+        this.disconnect(session);
+        continue;
+      }
+
+      if (session.peerId && now - session.lastPingSent >= HEARTBEAT_INTERVAL_MS) {
+        this.sendFrame(session, session.peerId, EasyTierPacketType.Ping, new TextEncoder().encode('ping'));
+        session.lastPingSent = now;
+      }
+    }
+  }
+
+  private async loadControlState(): Promise<void> {
+    const stored = await this.state.storage.get<PersistedControlState>(CONTROL_STATE_STORAGE_KEY);
+    if (!stored) return;
+    this.routeVersion = Math.max(this.routeVersion, safeU32(stored.routeVersion, this.routeVersion));
+    this.topologyUpdatedAt = typeof stored.topologyUpdatedAt === 'string' ? stored.topologyUpdatedAt : undefined;
+    this.routePeers = new Map((stored.routePeers ?? [])
+      .filter((peer) => Number.isInteger(peer.peerId) && peer.peerId > 0)
+      .map((peer) => [peer.peerId, { ...peer, proxyCidrs: Array.isArray(peer.proxyCidrs) ? peer.proxyCidrs : [] }]));
+    this.rawRoutePeerInfos = new Map((stored.rawRoutePeerInfos ?? [])
+      .filter((info) => Number.isInteger(info.peerId) && info.peerId > 0)
+      .map((info) => [info.peerId, cloneRoutePeerInfo({ ...info, proxyCidrs: Array.isArray(info.proxyCidrs) ? info.proxyCidrs : [] })]));
+    this.connBitmapEdges = sanitizeTopologyEdges(stored.connBitmapEdges ?? []);
+    this.peerCenter = new Map();
+    for (const entry of stored.peerCenter ?? []) {
+      if (!Number.isInteger(entry.peerId) || entry.peerId <= 0) continue;
+      this.peerCenter.set(entry.peerId, {
+        lastSeen: typeof entry.lastSeen === 'string' ? entry.lastSeen : new Date().toISOString(),
+        directPeers: new Map((entry.directPeers ?? [])
+          .filter(([peerId, info]) => Number.isInteger(peerId) && peerId > 0 && Number.isFinite(info?.latencyMs))
+          .map(([peerId, info]) => [peerId, { latencyMs: info.latencyMs }])),
+      });
+    }
+    this.peerCenterEdges = edgesFromPeerCenter(this.peerCenter);
+    if (this.pruneStaleRouteState()) await this.persistControlState();
+  }
+
+  private queueControlStatePersist(immediate = false): void {
+    if (immediate) {
+      this.state.waitUntil(this.persistControlState());
+      return;
+    }
+    const now = Date.now();
+    if (now - this.lastControlStatePersist >= CONTROL_STATE_PERSIST_MIN_MS) {
+      this.state.waitUntil(this.persistControlState());
+      return;
+    }
+    if (this.controlStatePersistQueued) return;
+    this.controlStatePersistQueued = true;
+    const delayMs = CONTROL_STATE_PERSIST_MIN_MS - (now - this.lastControlStatePersist);
+    this.state.waitUntil(new Promise((resolve) => setTimeout(resolve, delayMs)).then(() => this.persistControlState()));
+  }
+
+  private async persistControlState(): Promise<void> {
+    this.controlStatePersistQueued = false;
+    this.lastControlStatePersist = Date.now();
+    await this.state.storage.put<PersistedControlState>(CONTROL_STATE_STORAGE_KEY, {
+      routeVersion: this.routeVersion,
+      ...(this.topologyUpdatedAt ? { topologyUpdatedAt: this.topologyUpdatedAt } : {}),
+      routePeers: [...this.routePeers.values()],
+      rawRoutePeerInfos: [...this.rawRoutePeerInfos.values()].map(cloneRoutePeerInfo),
+      connBitmapEdges: [...this.connBitmapEdges],
+      peerCenter: [...this.peerCenter.entries()].map(([peerId, info]) => ({
+        peerId,
+        lastSeen: info.lastSeen,
+        directPeers: [...info.directPeers.entries()].map(([toPeerId, direct]) => [toPeerId, { latencyMs: direct.latencyMs }]),
+      })),
+    });
+  }
+
+  private async ensureMaintenanceAlarm(): Promise<void> {
+    if (this.sessions.size === 0 && !this.hasObservedNetworkState()) return;
+    const existing = await this.state.storage.getAlarm();
+    const next = Date.now() + MAINTENANCE_ALARM_MS;
+    if (existing === null || existing <= Date.now()) await this.state.storage.setAlarm(next);
+  }
+
+  private currentRoomId(): string | undefined {
+    const session = this.sessions.values().next().value as Session | undefined;
+    return session?.roomId ?? this.events.at(-1)?.roomId;
   }
 
   private queueDirectorySync(roomId: string, immediate = false): void {
@@ -843,16 +1070,27 @@ function firstNetworkLength(infos: Map<number, RoutePeerInfo>): number | undefin
   return undefined;
 }
 
-function fullMeshConnBitmap(peerIds: number[], version: number): RouteConnBitmap {
-  const size = peerIds.length;
+export function buildRouteConnBitmapForUpdate(peerIds: number[], version: number, observedEdges: TopologyEdge[], livePeerIds: Set<number>): RouteConnBitmap {
+  const orderedPeerIds = [...new Set(peerIds)].filter((peerId) => peerId > 0).sort((a, b) => a - b);
+  const size = orderedPeerIds.length;
   const bitmap = new Uint8Array(Math.ceil((size * size) / 8));
-  for (let row = 0; row < size; row += 1) {
-    for (let col = 0; col < size; col += 1) {
-      const bitIndex = row * size + col;
-      bitmap[Math.floor(bitIndex / 8)] |= 1 << (bitIndex % 8);
-    }
+  const indexByPeerId = new Map(orderedPeerIds.map((peerId, index) => [peerId, index]));
+  const setBit = (fromPeerId: number, toPeerId: number): void => {
+    const row = indexByPeerId.get(fromPeerId);
+    const col = indexByPeerId.get(toPeerId);
+    if (row === undefined || col === undefined) return;
+    const bitIndex = row * size + col;
+    bitmap[Math.floor(bitIndex / 8)] |= 1 << (bitIndex % 8);
+  };
+
+  for (const peerId of orderedPeerIds) setBit(peerId, peerId);
+  for (const peerId of livePeerIds) {
+    setBit(EDGE_PEER_ID, peerId);
+    setBit(peerId, EDGE_PEER_ID);
   }
-  return { peerIds: peerIds.map((peerId) => ({ peerId, version })), bitmap };
+  for (const edge of observedEdges) setBit(edge.fromPeerId, edge.toPeerId);
+
+  return { peerIds: orderedPeerIds.map((peerId) => ({ peerId, version })), bitmap };
 }
 
 function edgesFromConnBitmap(conn: RouteConnBitmap): TopologyEdge[] {
@@ -892,6 +1130,30 @@ function mergeTopologyEdges(...groups: TopologyEdge[][]): TopologyEdge[] {
   return [...byKey.values()].sort(compareTopologyEdges);
 }
 
+export function buildTopologySummary(nodes: RoutePeerSnapshot[], edges: TopologyEdge[]): TopologySummary {
+  const connBitmapEdgeCount = edges.filter((edge) => edge.source === 'conn_bitmap').length;
+  const peerCenterEdgeCount = edges.filter((edge) => edge.source === 'peer_center').length;
+  const latencyValues = edges
+    .map((edge) => edge.latencyMs)
+    .filter((latency): latency is number => latency !== undefined && Number.isFinite(latency));
+  const latencyTotal = latencyValues.reduce((sum, latency) => sum + latency, 0);
+  return {
+    nodeCount: nodes.length,
+    edgeCount: edges.length,
+    connBitmapEdgeCount,
+    peerCenterEdgeCount,
+    latencyEdgeCount: latencyValues.length,
+    ...(latencyValues.length > 0 ? { averageLatencyMs: Math.round(latencyTotal / latencyValues.length) } : {}),
+    ...(edges.length > 0 ? { peerCenterRatio: peerCenterEdgeCount / edges.length } : {}),
+  };
+}
+
+export function framePeerBindingCandidate(currentPeerId: number | undefined, fromPeerId: number): number | undefined {
+  if (!fromPeerId || fromPeerId === EDGE_PEER_ID) return undefined;
+  if (currentPeerId !== undefined) return undefined;
+  return fromPeerId;
+}
+
 function compareTopologyEdges(a: TopologyEdge, b: TopologyEdge): number {
   return a.fromPeerId - b.fromPeerId || a.toPeerId - b.toPeerId || a.source.localeCompare(b.source);
 }
@@ -926,6 +1188,54 @@ function peerCenterDigest(map: PeerCenterGlobalMap): bigint {
   return hash;
 }
 
+export function resolveNetworkConfig(env: Pick<Env, 'EASYTIER_NETWORK_NAME' | 'EASYTIER_NETWORK_SECRET' | 'EASYTIER_NETWORK_SECRETS' | 'EASYTIER_NETWORKS'>, roomId: string): NetworkConfig {
+  const networkConfigs = parseNetworkConfigMap(env.EASYTIER_NETWORKS);
+  const mappedSecrets = parseNetworkSecretMap(env.EASYTIER_NETWORK_SECRETS);
+  const mappedConfig = networkConfigs.get(roomId);
+  if (mappedConfig) {
+    return {
+      networkName: mappedConfig.networkName,
+      secret: mappedConfig.secret ?? mappedSecrets.get(roomId) ?? mappedSecrets.get(mappedConfig.networkName) ?? env.EASYTIER_NETWORK_SECRET,
+    };
+  }
+
+  const networkName = env.EASYTIER_NETWORK_NAME || roomId;
+  return {
+    networkName,
+    secret: mappedSecrets.get(roomId) ?? mappedSecrets.get(networkName) ?? env.EASYTIER_NETWORK_SECRET,
+  };
+}
+
+function parseNetworkConfigMap(raw: string | undefined): Map<string, NetworkConfig> {
+  if (!raw) return new Map();
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return new Map();
+    const out = new Map<string, NetworkConfig>();
+    for (const [roomId, value] of Object.entries(parsed)) {
+      if (typeof value === 'string' && value) {
+        out.set(roomId, { networkName: roomId, secret: value });
+      } else if (value && typeof value === 'object' && !Array.isArray(value)) {
+        const record = value as Record<string, unknown>;
+        const networkName = typeof record.networkName === 'string'
+          ? record.networkName
+          : typeof record.name === 'string'
+            ? record.name
+            : roomId;
+        const secret = typeof record.secret === 'string'
+          ? record.secret
+          : typeof record.networkSecret === 'string'
+            ? record.networkSecret
+            : undefined;
+        if (networkName) out.set(roomId, { networkName, secret });
+      }
+    }
+    return out;
+  } catch {
+    return new Map();
+  }
+}
+
 function parseNetworkSecretMap(raw: string | undefined): Map<string, string> {
   if (!raw) return new Map();
   try {
@@ -939,6 +1249,21 @@ function parseNetworkSecretMap(raw: string | undefined): Map<string, string> {
   } catch {
     return new Map();
   }
+}
+
+function safeU32(value: unknown, fallback: number): number {
+  return Number.isInteger(value) && Number(value) >= 0 && Number(value) <= 0xffff_ffff ? Number(value) : fallback;
+}
+
+function sanitizeTopologyEdges(edges: TopologyEdge[]): TopologyEdge[] {
+  return edges.filter((edge) => (
+    Number.isInteger(edge.fromPeerId)
+    && edge.fromPeerId > 0
+    && Number.isInteger(edge.toPeerId)
+    && edge.toPeerId > 0
+    && (edge.source === 'conn_bitmap' || edge.source === 'peer_center')
+    && (edge.latencyMs === undefined || Number.isFinite(edge.latencyMs))
+  ));
 }
 
 function describeFrameSplitFailure(message: ArrayBuffer): string {

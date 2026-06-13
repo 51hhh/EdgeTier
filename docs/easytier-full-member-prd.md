@@ -3,7 +3,7 @@
 > 交接文档。面向没有此前对话上下文的实现 agent。读完即可独立接手 Phase B/C/D。
 > 配套阅读:`docs/easytier-protocol-integration-plan.md`(可行性与复用映射)。
 
-最后更新:2026-06-13 · 当前 commit:`9d02622` · package version `0.1.1`
+最后更新:2026-06-13 · 当前 commit:`3c89744` + 本轮 Worker-feasible 改动(未提交,已部署验证版本 `8e2be8b0-7244-47b5-852f-dbd0b4ce36a3`) · package version `0.1.1`
 
 ---
 
@@ -32,6 +32,8 @@
 | 测试数据注入接口(`POST /api/rooms/:id/test-seed`,session 守护) | 已部署 | `bae780e` | `src/durable-objects/relay-room.ts`, `src/observer/api.ts` |
 | **EasyTier 加密原语**(SipHash KDF + AES-GCM/WebCrypto)对齐 Rust 2.6.4 + 真机 | 已验证 | `c405173` | `src/easytier/crypto.ts` (+`crypto.test.ts`) |
 | **握手编解码** + 真机端到端验证(握手成功 + 解密真实 RPC) | 已验证 | `9d02622` | `src/easytier/handshake.ts` (+`handshake.test.ts`, `realtraffic.test.ts`) |
+| **RPC/route/PeerCenter decode + topology observer** | 本地已实现 | `3c89744` | `src/easytier/rpc.ts`, `src/durable-objects/relay-room.ts`, `src/observer/types.ts`, `src/dashboard/components/Topology.tsx` |
+| **W2/W3/W4/W6 Worker-feasible hardening** | 已部署验证 | 工作区 / Worker `8e2be8b0` | route push/broadcast bitmap 修正、DO storage/alarms、topology summary DTO、`EASYTIER_NETWORKS`、peer-id rebind 防护 |
 
 ### 1.1 真机端到端已验证的事实(Phase A 打通)
 
@@ -44,16 +46,26 @@
 
 → "EdgeTier 能解出组网全部信息"已是被真实节点验证的事实,不再是猜想。
 
-### 1.2 现有 EdgeTier 运行模型(改造前)
+### 1.2 当前 EdgeTier 运行模型
 
 - `/ws?room=<room>&token=<jwt>`:WSS 接入,token 由 `RelayRoom` 上游的 worker 鉴权。
-- `RelayRoom`(Durable Object):维护 WS 会话、按 16 字节包头 `toPeerId` **盲转发**、记录事件/流量、
-  解析包头(`src/easytier/packet.ts`)、启发式观测握手/RPC(`src/easytier/rpc.ts`,**仅文本扫描,非真解码**)。
+- `RelayRoom`(Durable Object):维护 WS 会话、按 16 字节包头 `toPeerId` 定向转发、记录事件/流量,
+  解析握手、解密 RPC、解码 SyncRouteInfo/PeerCenter,响应 RPC,主动 route push/broadcast,并用 DO storage/alarms 持久化和清理 route/PeerCenter 观测状态。
 - `Directory`(DO):房间目录,带 recent-activity TTL(active/stale)。
-- observer API(`src/observer/api.ts`):`/api/health` `/api/rooms` `/api/rooms/:id[/peers|events|traffic|token|test-seed]`。
-- 面板:出口/虚拟IP/拓扑目前是"待 proto 解码"占位 + 可注入 seed 假数据。
+- observer API(`src/observer/api.ts`):`/api/health` `/api/rooms` `/api/rooms/:id[/peers|events|traffic|topology|token|test-seed]`。
+- 面板:Devices/Overview/Topology 显示真实 RoutePeerInfo、conn bitmap、PeerCenter latency summary;seed 数据仅作显式测试开关。
 
-**局限(本 PRD 要消除的)**:只能看到经 EdgeTier 中继的包头级信息,看不到整网;不解密;不解 RPC。
+**剩余局限**:Worker 仍不能主动拨 UDP/TUN/L3;完整 RoutePeerInfo 依赖真实 EasyTier 节点拨入 WSS 并向 Worker 泛洪路由。尚缺压缩 route 表真机向量、断线 cleanup 长测、DO 重启/休眠、per-room secret 隔离验证。
+
+### 1.3 本轮部署验证补充(2026-06-13)
+
+部署版本:`8e2be8b0-7244-47b5-852f-dbd0b4ce36a3`。
+
+- 线上 `/api/health`、`/dashboard/`、`POST /api/rooms/home-mesh/token` 均返回 200。
+- 测试机 easytier-core 2.6.4 使用 `home-mesh` 配置拨入 Worker WSS;真实节点日志显示 `dst_peer_id: 10000001`,Worker 作为 `edgetier-worker` peer 被接受。
+- 非 `no_tun` 完整 route 场景下,Worker API 显示 `websocketCount=1`,无重复 peer id;Topology summary 为 9 nodes / 27 edges,其中 conn bitmap 25 edges、PeerCenter latency 2 edges。9 个节点里包含多次测试产生的短期 stale `toe2-worker-validation` peer,不是 Worker 解码错误。
+- `no_tun=true` 场景可验证 WSS 长连和 PeerCenter,但收到的 `OspfRouteRpc.SyncRouteInfo` 为 0 个 peer info;该模式不适合作为"全量 RoutePeerInfo"验收。
+- 修复了真实验证暴露的 session 绑定问题:握手后不再用后续控制包的 `header.fromPeerId` 重绑 session,避免临时显示为 `EDGE_PEER_ID`。
 
 ---
 
@@ -124,7 +136,7 @@ RpcReq=8 / RpcResp=9 的 body(加密)解密后是 `common.RpcPacket` → 内含 
 总策略:**移植 `cf-workers-et-ws/src/worker/core/*` 的成熟逻辑到 EdgeTier TS**,接 EdgeTier 现有
 鉴权/observer/面板;EdgeTier 私有鉴权门禁保持在最前。每阶段以"真机 + 面板真实数据"验收。
 
-### Phase B — 解密 + RPC 解码(只读观测)
+### Phase B — 解密 + RPC 解码(只读观测)（✅ 本地已实现;待真实多节点验证）
 目标:`RelayRoom` 解密加密帧、解 RPC、把整网信息灌进 observer,面板显示真实组网。
 
 任务:
@@ -133,29 +145,29 @@ RpcReq=8 / RpcResp=9 的 body(加密)解密后是 `common.RpcPacket` → 内含 
 2. **per-room network_secret**:`Env` 加 secret 来源(按 room 映射;MVP 可单网络 `EASYTIER_NETWORK_SECRET` Worker secret)。
    `RelayRoom` 持有该 secret,`deriveKeys` 缓存 key128/key256。
 3. **解密路径**:`onMessage` 中 `flags & 1` 时用 `decryptAesGcm` 解 body(异步;注意 WS 消息处理改 async + 顺序)。
-4. **RPC 解码**:type 8/9 → 解 `RpcPacket`→(可能 gunzip)→ `RpcRequest`→ 按 service 分派:
+4. **RPC 解码**:type 8/9 → 解 `RpcPacket`→(可能 Zstd 解压)→ `RpcRequest`/`RpcResponse`→ 按 service 分派:
    - `OspfRouteRpc.SyncRouteInfo`:解 `RoutePeerInfo[]` + `RouteConnBitmap` → 存入房间路由表。
    - `PeerCenterRpc.GetGlobalPeerMap`/`ReportPeers`:维护 `globalPeerMap`(latency)。
 5. **observer 聚合**:扩展 `src/observer/types.ts`,把 RoutePeerInfo(虚拟 IP/hostname/NAT/版本/cost)、
    conn bitmap、global peer map 映射成 DTO;新增 `GET /api/rooms/:id/topology`。
 6. **面板**:Devices 显示真实虚拟 IP/hostname/NAT/版本;去掉"待 proto 解码"占位;Overview 出真实在线/离线/出口。
 
-验收:真机连入 → 面板显示该节点真实虚拟 IP/hostname/NAT/版本(非 seed)。新增解码单测(用 `realtraffic.test.ts` 同款真机向量,断言解出 RoutePeerInfo 字段)。
+验收:真机连入 → 面板显示该节点真实虚拟 IP/hostname/NAT/版本(非 seed)。本地真机向量已覆盖单节点 SyncRouteInfo;本轮部署已覆盖真实 `home-mesh` 多节点 RoutePeerInfo/conn bitmap;压缩 route 表仍需真机向量。
 
-### Phase C — 做合格 shared node(真节点稳定长连)
+### Phase C — 做合格 shared node(真节点稳定长连)（🟡 Worker-feasible 本地实现;待 live evidence）
 1. **Ping→Pong**:收到 type 4 回 type 5(payload 回显)。
 2. **正确 RPC 响应**:`SyncRouteInfo` 回 `SyncRouteInfoResponse`(参考 `rpc_handler.js` 的 session/isInitiator);
    `PeerCenter` 回对应响应。维护并推送/广播路由更新使组网收敛。
-3. **保活与幽灵节点**:心跳间隔/连接超时/单调递增版本号;DO hibernation 兼容(`cf-workers-et-ws` 方案)。
+3. **保活与幽灵节点**:DO alarm 发送 Ping、连接超时清理、单调递增 routeVersion、断连时清理该来源 route/PeerCenter 状态并广播更新。
 4. **多节点中继**:两个真节点经 EdgeTier 互通,directed forwarding 保持正确(现有逻辑已验证转发)。
 
-验收:真节点把 EdgeTier 当 peer **长期在线**(不再 6 秒断);两节点经 EdgeTier 形成组网;断线秒级反映到面板。
+验收:真节点把 EdgeTier 当 peer **长期在线**(不再 6 秒断);两节点经 EdgeTier 形成组网;断线秒级反映到面板。本轮已验证长于 45 秒的真实 WSS 控制面与 PeerCenter/route 响应;断线 cleanup 与长测仍需补证据。
 
-### Phase D — 拓扑与延迟可视化
-1. conn bitmap → 拓扑图(direct/relay/unknown 边);global peer map → 延迟图 + P2P/relay 比例。
-2. 路由更新事件流;面板新增拓扑页。
+### Phase D — 拓扑与延迟可视化（✅ DTO/API/页面已实现;待真实数据验证）
+1. conn bitmap → 拓扑边;global peer map → latency edges + PeerCenter ratio summary。
+2. 路由更新事件流;面板 Topology 页展示节点、边、latency、summary。
 
-验收:面板展示组网拓扑与节点间延迟,P2P/relay 状态如实标注。
+验收:面板展示组网拓扑与节点间延迟,P2P/relay 状态如实标注。本轮已验证 topology summary 输出真实 conn bitmap + PeerCenter latency edges。
 
 ---
 
@@ -167,18 +179,19 @@ src/easytier/
   packet.ts        # 16 字节头 parse/create                                [已完成]
   crypto.ts        # SipHash KDF + AES-GCM(WebCrypto)                      [已完成/已验证]
   handshake.ts     # HandshakeRequest 编解码 + 响应构建                     [已完成/已验证]
-  rpc.ts           # 现为启发式观测；Phase B 重写为真 protobuf 解码 + 分派   [待重写]
-  protos/          # vendored 官方 proto + protobufjs 静态代码              [Phase B 新增]
+  rpc.ts           # protobuf 解码/编码 + Zstd + SyncRouteInfo/PeerCenter    [已实现]
+  protobuf.ts      # 手写 protobuf reader/writer                            [已实现]
+  zstd.ts          # Worker-compatible Zstd 解压                             [已实现]
   types.ts         # 协议观测类型                                          [扩展]
 src/durable-objects/
-  relay-room.ts    # 接握手分支 + 解密 + RPC 处理 + 路由表 + Pong + 保活     [Phase B/C 改造]
+  relay-room.ts    # 握手/解密/RPC/Pong/route push/PeerCenter/storage/alarms [Phase B/C/D]
   directory.ts     # 房间目录(沿用)
 src/observer/
   api.ts           # 新增 /api/rooms/:id/topology;路由/peer DTO            [Phase B 扩展]
-  types.ts         # 新增 RoutePeerInfo/ConnBitmap/GlobalPeerMap DTO        [Phase B 扩展]
+  types.ts         # RoutePeer/Topology/Summary DTO                         [Phase B/D 扩展]
 src/dashboard/     # Devices/Overview/Topology 接真实数据                    [Phase B/D]
 src/worker/
-  env.ts           # 加 per-room network_secret 来源                        [Phase B]
+  env.ts           # EASYTIER_NETWORK_SECRET/NAME/SECRETS/NETWORKS          [Phase B/W6]
 proto/easytier/    # proto 漂移校验目标(scripts/check-proto-drift.mjs)
 ```
 
@@ -226,6 +239,6 @@ proto/easytier/    # proto 漂移校验目标(scripts/check-proto-drift.mjs)
 
 1. 读本 PRD + `docs/easytier-protocol-integration-plan.md` + `src/easytier/{crypto,handshake,constants,packet}.ts` 与其测试。
 2. 通读 `research/github/cf-workers-et-ws/src/worker/core/{rpc_handler,peer_manager,global_state,protos,compress}.js`。
-3. Phase B 第 1 步:引 protobufjs + vendored proto,写 RpcPacket/SyncRouteInfo 解码,**用 `realtraffic.test.ts` 同款真机向量断言解出 RoutePeerInfo 字段**(hostname=toe2-ubuntu24、version=2.6.4)。
-4. 接 `RelayRoom`:解密 + 解码 + 路由表 + Pong;`.dev.vars`/Worker secret 提供 network_secret。
+3. 继续真实多节点验证:压缩 route 表、长连、断线清理、PeerCenter latency、DO 重启/休眠、`EASYTIER_NETWORKS` 多网络隔离。
+4. `.dev.vars`/Worker secret 提供 network_secret;不得提交真实 secret、tokenized WSS URI 或未脱敏日志。
 5. 用第 5 节真机环验收;每步全门禁绿后再 commit。

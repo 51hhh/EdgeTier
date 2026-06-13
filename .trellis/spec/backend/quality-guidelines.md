@@ -220,6 +220,8 @@ RelayRoom.handleRpc(session, header, payload, frame): Promise<boolean>
 | `RpcResp` target is EdgeTier | Decode/record response, do not send another response |
 | `RpcResp` descriptor is `OspfRouteRpc` | Do not call `decodeSyncRouteInfoRequest` on the response wrapper |
 | EdgeTier pushes `OspfRouteRpc.SyncRouteInfo` as a server-initiated `RpcReq` | Wrap it in `RpcRequest` + `RpcPacket`, encrypt when the session has keys, and throttle pushes per session |
+| EdgeTier builds a server-pushed `RouteConnBitmap` | Include observed conn-bitmap edges plus EdgeTier-to-live-peer edges; do not synthesize full-mesh connectivity across route-only peers |
+| A session is already bound to a client peer id | Do not rebind it from later packet headers; ignore `header.fromPeerId === EDGE_PEER_ID` to avoid showing the remote session as EdgeTier itself |
 | `RpcPacket.compression_info.algo === 2` | Zstd-decompress `RpcPacket.body` with a Worker-compatible implementation before decoding `RpcRequest`; do not treat EasyTier RPC compression as gzip |
 | EdgeTier sends active `PeerCenterRpc.GetGlobalPeerMap` | Use `methodIndex = 2`; `methodIndex = 1` is `ReportPeers` in official 2.6.4 |
 | Unsupported compressed RPC body | Record unsupported compression; do not claim route-sync decode |
@@ -230,11 +232,15 @@ RelayRoom.handleRpc(session, header, payload, frame): Promise<boolean>
 - Good: a real `RpcReq` carrying `OspfRouteRpc.SyncRouteInfo` updates route peers and receives one `SyncRouteInfoResponse`.
 - Good: server-initiated route sync uses `methodIndex = 1`, and server-initiated PeerCenter global-map requests use `methodIndex = 2`.
 - Good: route update pushes are rate-limited so frequent empty client route-sync requests do not create control-plane spam.
+- Good: route update bitmaps advertise EdgeTier as connected to live WebSocket peers and preserve observed conn-bitmap edges without inventing direct links between route-only peers.
+- Good: session peer identity is established from the handshake / first non-Edge packet and later control packets cannot rebind it to `EDGE_PEER_ID`.
 - Good: a Zstd-compressed `RpcPacket.body` is decompressed with a Worker-compatible implementation before service dispatch.
 - Base: an `RpcResp` for `OspfRouteRpc` is observed but produces no `syncRouteInfo` object.
 - Bad: treating every `OspfRouteRpc` descriptor as a request and responding to an incoming `RpcResp`.
 - Bad: using `methodIndex = 0` for official EasyTier 2.6.4 RPC calls because typical protobuf method arrays are 0-based.
 - Bad: pushing a route update after every empty route-sync request from a real EasyTier node.
+- Bad: broadcasting a full-mesh conn bitmap for all known route peers when those edges were not observed.
+- Bad: calling `bindPeer(session, header.fromPeerId)` for every packet after handshake; some real control-plane packets can transiently carry EdgeTier's own peer id.
 - Bad: treating EasyTier compressed RPC bodies as gzip or marking `algo === 2` unsupported.
 
 ### 6. Tests Required
@@ -244,6 +250,7 @@ RelayRoom.handleRpc(session, header, payload, frame): Promise<boolean>
 - Regression test `decodeEasyTierRpcPayload` does not expose `syncRouteInfo` for `RpcPacket.is_request === false`.
 - Regression test `decodeEasyTierRpcPayload` decompresses a Zstd-compressed `RpcRequest` before `SyncRouteInfo` service decode.
 - Real traffic tests should assert decoded request peer identity fields from captured `RpcReq` vectors.
+- Regression test session peer binding ignores `EDGE_PEER_ID` and later non-matching `fromPeerId` values after the client peer has been established.
 
 ### 7. Wrong vs Correct
 

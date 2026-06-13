@@ -148,3 +148,37 @@ Notes:
 - Once a real node connects over WSS with the matching `home-mesh` secret, Worker is accepted as an EasyTier control-plane peer and can decode route/topology information from that bridged node.
 - Repeated smoke tests with the generic config generated multiple temporary peer ids for `toe2-ubuntu24`; EasyTier retained a short-lived stale route entry, so a later smoke snapshot temporarily showed 6 peers. This was test churn, not a Worker decode issue. A persistent node should use a stable `instance_id`.
 - Temporary local and remote `/tmp` configs/logs/tokens containing the real network secret or WSS token were removed after validation.
+
+## Worker-Feasible B/C/D Follow-Up Check
+
+Deployment version validated:
+
+- `8e2be8b0-7244-47b5-852f-dbd0b4ce36a3`: route bitmap no longer fabricates full mesh, control state is persisted to DO storage, DO alarm heartbeat/TTL cleanup is enabled, topology API includes summary, `EASYTIER_NETWORKS` per-room config is supported, and session peer binding ignores post-handshake `EDGE_PEER_ID` rebinding attempts.
+
+Online route checks after deployment:
+
+- `POST /api/auth/login`: `200`
+- `GET /api/health`: `200`
+- `GET /dashboard/`: `200`
+- `POST /api/rooms/home-mesh/token`: `200`
+
+`no_tun=true` validation window:
+
+- Test node connected to Worker WSS and remained online for 70s.
+- Worker decoded PeerCenter requests/reports; topology summary reached 4 nodes / 3 PeerCenter latency edges.
+- Worker received `OspfRouteRpc.SyncRouteInfo` with 0 peer info items. This validates WSS control-plane stability but not full RoutePeerInfo extraction; `no_tun=true` is not a reliable full-route validation mode for this mesh.
+- No duplicate peer ids appeared after the session binding fix.
+
+Full route validation window:
+
+- Test node connected to Worker WSS and public TCP/UDP peers with the same `home-mesh` secret.
+- At `t+45s`, `/api/rooms/home-mesh` reported `websocketCount=1` and no duplicate peer ids.
+- `/api/rooms/home-mesh/topology` reported 9 nodes / 27 edges: 25 conn-bitmap edges and 2 PeerCenter latency edges, average latency about 174 ms.
+- Real route peers included `home-kwrt`, `rick-MRGF-XX`, `Xiaomi K80`, and multiple `toe2-worker-validation`/`toe2-ubuntu24` entries from repeated validation runs.
+- The extra `toe2` entries are EasyTier route-table residue from repeated temporary test instances, not a Worker decode or peer-binding error.
+
+Security / cleanup notes:
+
+- WSS token and network secret were only used from gitignored local files and temporary `/tmp` configs.
+- The remote test process was stopped after evidence capture; temporary local and remote `/tmp` configs/logs/tokens containing secret material were removed.
+- Cloudflare Workers still cannot run TUN/L3 data plane or dial UDP peers. Worker membership is achieved when a real EasyTier node initiates the WSS peer connection.

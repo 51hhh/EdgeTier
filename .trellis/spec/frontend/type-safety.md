@@ -29,6 +29,8 @@ PeerSnapshot
 TrafficSnapshot
 RoomSnapshot
 DirectoryRoomSummary
+TopologySnapshot
+TopologySummary
 ```
 
 Dashboard API helpers:
@@ -56,6 +58,8 @@ markRoomActivity(rooms: DirectoryRoomSummary[], now?: number): DirectoryRoomSumm
 - Caller-supplied `active` must not be trusted or stored as truth.
 - `RoomSnapshot.recentEvents` is the recent ring-buffer view, not an audit log.
 - `TrafficSnapshot` counters are numbers and monotonically increase for the current room object lifetime.
+- `TopologySnapshot.summary` is the API-owned aggregate for topology metrics. Dashboard components may render fallback values for older responses, but new API code must populate it.
+- `TopologySummary.peerCenterRatio` is a number from 0 to 1 when edges exist; render it as a percentage in the dashboard.
 
 ### 4. Validation & Error Matrix
 
@@ -64,6 +68,7 @@ markRoomActivity(rooms: DirectoryRoomSummary[], now?: number): DirectoryRoomSumm
 | Optional field missing | UI must render fallback text |
 | New API field added | Add to `src/observer/types.ts` first |
 | API response shape changed | Update dashboard helper return type and usage together |
+| Topology DTO changed | Update `TopologySnapshot`, `TopologySummary`, `/api/rooms/:roomId/topology`, and `Topology` component usage together |
 | Directory POST body unknown | Runtime-validate with `validateDirectoryRoomSummary` |
 | Directory POST body has caller-supplied `active` | Drop `active`; recompute on GET |
 | Protocol header parse fails | Return `null`, not a partially typed object |
