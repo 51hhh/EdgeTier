@@ -235,13 +235,16 @@ function ConnectionGraph({ topology, nodeByPeerId, t }: { topology?: TopologySna
                 const node = peerFor(peerId, nodeByPeerId);
                 const nodeColor = nodeColorForPeerId(node.peerId);
                 const r = nodeRadius(pos);
+                const tooltipLines = [
+                  peerFullLabel(node, t('common.unknownPeer')),
+                  node.udpNatType ? `UDP NAT: ${node.udpNatType}` : null,
+                  node.tcpNatType ? `TCP NAT: ${node.tcpNatType}` : null,
+                  node.virtualIpv4 ? `IP: ${node.virtualIpv4}` : null,
+                  node.easytierVersion ? `Version: ${node.easytierVersion}` : null,
+                  node.latencyMs !== undefined ? `Latency: ${node.latencyMs} ms` : null,
+                ].filter(Boolean).join('\n');
                 return <g key={node.peerId} className="graph-node-group" transform={`translate(${pos.x} ${pos.y})`}>
-                  <title>{peerFullLabel(node, t('common.unknownPeer'))}
-{node.udpNatType ? `UDP NAT: ${node.udpNatType}` : ''}
-{node.tcpNatType ? `TCP NAT: ${node.tcpNatType}` : ''}
-{node.virtualIpv4 ? `IP: ${node.virtualIpv4}` : ''}
-{node.easytierVersion ? `Version: ${node.easytierVersion}` : ''}
-{node.latencyMs !== undefined ? `Latency: ${node.latencyMs} ms` : ''}</title>
+                  <title>{tooltipLines}</title>
                   <circle className="graph-node" cx={0} cy={0} r={r} fill={nodeColor} stroke="var(--color-kumo-base)" strokeWidth={2.5} />
                   <text className="graph-node-label" x={0} y={4}>{shortPeerId(node.peerId)}</text>
                   <text className="graph-node-host-label" x={0} y={r + 16}>{compactPeerDisplayName(node, t('common.routeDataPending'))}</text>
