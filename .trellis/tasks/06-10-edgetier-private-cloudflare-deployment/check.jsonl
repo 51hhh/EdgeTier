@@ -1,1 +1,16 @@
-{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend quality checklist for Worker, Durable Object, protocol, and observer API changes."}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Verify module ownership, route contracts, and observer boundaries."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Verify protocol errors remain observable and secrets are not exposed."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Verify official proto authority, tests, typecheck, build, and proto drift expectations."}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Verify Durable Object storage remains summary-oriented and validated."}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Verify relay events are safe and do not include secrets/raw packets."}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Frontend quality checklist for dashboard/API contract changes."}
+{"file": ".trellis/spec/frontend/directory-structure.md", "reason": "Verify dashboard imports shared observer DTOs and keeps fetch helpers centralized."}
+{"file": ".trellis/spec/frontend/component-guidelines.md", "reason": "Verify Kumo/read-only dashboard behavior and empty states."}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "Verify polling preserves previous successful data through transient errors."}
+{"file": ".trellis/spec/frontend/type-safety.md", "reason": "Verify API DTO changes are typed and optional fields are safely handled."}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Verify frontend typecheck, tests, and build requirements."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Review cross-layer data flow from protocol decode to dashboard display."}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Review protocol helper reuse and avoid duplicated constants/parsers."}
+{"file": "docs/easytier-full-member-prd.md", "reason": "Primary acceptance criteria for EasyTier full-member integration."}
+{"file": "docs/easytier-protocol-integration-plan.md", "reason": "Protocol feasibility and staged implementation plan to check against."}

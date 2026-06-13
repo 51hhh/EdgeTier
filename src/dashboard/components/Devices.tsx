@@ -24,13 +24,19 @@ export function PeerDetail({ peer }: PeerDetailProps) {
         <Row label="Peer ID" value={peer.peerId ?? 'unknown (no parseable header yet)'} muted={peer.peerId === undefined} />
         <Row label="Session ID" value={peer.sessionId} />
         <Row label="Network name" value={peer.networkName ?? 'not observed'} muted={!peer.networkName} />
-        <Row label="Secret digest" value={peer.networkSecretDigestPrefix ?? 'not observed'} muted={!peer.networkSecretDigestPrefix} />
+        <Row label="Secret digest prefix" value={peer.networkSecretDigestPrefix ?? 'not observed'} muted={!peer.networkSecretDigestPrefix} />
+        <Row label="Hostname" value={peer.hostname ?? 'not decoded'} muted={!peer.hostname} />
+        <Row label="Virtual IPv4" value={peer.virtualIpv4 ?? 'not decoded'} muted={!peer.virtualIpv4} />
+        <Row label="Virtual IPv6" value={peer.virtualIpv6 ?? 'not decoded'} muted={!peer.virtualIpv6} />
+        <Row label="UDP NAT" value={peer.udpNatType ?? 'not decoded'} muted={!peer.udpNatType} />
+        <Row label="TCP NAT" value={peer.tcpNatType ?? 'not decoded'} muted={!peer.tcpNatType} />
+        <Row label="EasyTier version" value={peer.easytierVersion ?? 'not decoded'} muted={!peer.easytierVersion} />
+        <Row label="Proxy CIDRs" value={peer.proxyCidrs?.length ? peer.proxyCidrs.join(', ') : 'none observed'} muted={!peer.proxyCidrs?.length} />
         <Row label="Connected at" value={peer.connectedAt} />
         <Row label="Last seen" value={peer.lastSeen} />
         <Row label="RX" value={`${formatBytes(peer.rxBytes)} / ${peer.rxPackets} pkts`} />
         <Row label="TX" value={`${formatBytes(peer.txBytes)} / ${peer.txPackets} pkts`} />
       </div>
-      <Text as="p" variant="secondary" size="sm">Virtual IP, route table, and exit-node role are not observable until official EasyTier proto decode (v0.1.3).</Text>
     </LayerCard.Primary>
   </LayerCard>;
 }
@@ -48,6 +54,10 @@ export function PeerTable({ peers, selectedSession, onSelect }: PeerTableProps) 
   return <Table>
     <Table.Header><Table.Row>
       <Table.Head>Peer</Table.Head>
+      <Table.Head>Hostname</Table.Head>
+      <Table.Head>Virtual IP</Table.Head>
+      <Table.Head>NAT</Table.Head>
+      <Table.Head>Version</Table.Head>
       <Table.Head>Status</Table.Head>
       <Table.Head>Last seen</Table.Head>
       <Table.Head>RX</Table.Head>
@@ -61,6 +71,10 @@ export function PeerTable({ peers, selectedSession, onSelect }: PeerTableProps) 
               <Badge variant="outline">{peer.peerId ?? 'unknown'}</Badge>
             </button>
           </Table.Cell>
+          <Table.Cell>{peer.hostname ?? 'unknown'}</Table.Cell>
+          <Table.Cell>{peer.virtualIpv4 ?? peer.virtualIpv6 ?? 'unknown'}</Table.Cell>
+          <Table.Cell>{peer.udpNatType ?? 'unknown'}</Table.Cell>
+          <Table.Cell>{peer.easytierVersion ?? 'unknown'}</Table.Cell>
           <Table.Cell><Badge variant={peer.connected ? 'primary' : 'secondary'}>{peer.connected ? 'online' : 'offline'}</Badge></Table.Cell>
           <Table.Cell>{peer.lastSeen}</Table.Cell>
           <Table.Cell>{formatBytes(peer.rxBytes)}</Table.Cell>

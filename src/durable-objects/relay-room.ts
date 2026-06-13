@@ -1,18 +1,59 @@
-import { EasyTierPacketType, MAX_FRAME_SIZE, MAX_INVALID_PACKETS_PER_SESSION, MAX_PEERS_PER_ROOM, RECENT_EVENTS_LIMIT } from '../easytier/constants';
-import { parseEasyTierHeader, payloadLengthMatches } from '../easytier/packet';
-import { observeHandshake, observeRpc } from '../easytier/rpc';
-import type { PeerSnapshot, RelayEvent, RoomSnapshot, TrafficSnapshot } from '../observer/types';
+import { EASYTIER_HEADER_SIZE, EASYTIER_MAGIC, EASYTIER_VERSION, EDGE_PEER_ID, EasyTierPacketType, MAX_FRAME_SIZE, MAX_INVALID_PACKETS_PER_SESSION, MAX_PEERS_PER_ROOM, RECENT_EVENTS_LIMIT } from '../easytier/constants';
+import { AEAD_TAIL_SIZE, decryptAesGcm, deriveKeys, encryptAesGcm, type DerivedKeys } from '../easytier/crypto';
+import { buildHandshakeResponse, decodeHandshake, encodeHandshake } from '../easytier/handshake';
+import { createEasyTierFrame, parseEasyTierHeader, payloadLengthMatches, splitEasyTierFrames, type EasyTierPacketHeader } from '../easytier/packet';
+import { bytesEqual, hex } from '../easytier/protobuf';
+import {
+  buildRpcRequestPayload,
+  buildRpcResponsePayload,
+  decodeEasyTierRpcPayload,
+  encodeGetGlobalPeerMapRequest,
+  encodeGetGlobalPeerMapResponse,
+  encodeReportPeersResponse,
+  encodeSyncRouteInfoRequest,
+  encodeSyncRouteInfoResponse,
+  natTypeName,
+  observeHandshake,
+  observeRpc,
+  type DecodedEasyTierRpc,
+  type DirectConnectedPeerInfo,
+  type PeerCenterGlobalMap,
+  type PeerInfoForGlobalMap,
+  type ReportPeersRequest,
+  type RouteConnBitmap,
+  type RoutePeerInfo,
+  type SyncRouteInfoRequest,
+} from '../easytier/rpc';
+import type { PeerSnapshot, RelayEvent, RoomSnapshot, RoutePeerSnapshot, TopologyEdge, TopologySnapshot, TrafficSnapshot } from '../observer/types';
 import type { Env } from '../worker/env';
 
-type Session = PeerSnapshot & { ws: WebSocket; invalidPackets: number };
+type Session = PeerSnapshot & {
+  ws: WebSocket;
+  invalidPackets: number;
+  messageQueue: Promise<void>;
+  keys?: DerivedKeys;
+  serverSessionId?: bigint;
+  handshakeAccepted?: boolean;
+  lastRoutePushAt?: number;
+  ospfDescriptor?: DecodedEasyTierRpc['descriptor'];
+};
 
 const DIRECTORY_SYNC_MIN_MS = 5_000;
+const ROUTE_PUSH_MIN_MS = 10_000;
+const ROUTE_STATE_TTL_MS = 180_000;
 
 export class RelayRoom implements DurableObject {
   private sessions = new Map<string, Session>();
   private peers = new Map<number, string>();
   private events: RelayEvent[] = [];
   private seededPeers: PeerSnapshot[] = [];
+  private routePeers = new Map<number, RoutePeerSnapshot>();
+  private rawRoutePeerInfos = new Map<number, RoutePeerInfo>();
+  private connBitmapEdges: TopologyEdge[] = [];
+  private peerCenter = new Map<number, { directPeers: Map<number, DirectConnectedPeerInfo>; lastSeen: string }>();
+  private peerCenterEdges: TopologyEdge[] = [];
+  private topologyUpdatedAt: string | undefined;
+  private routeVersion = Math.floor(Date.now() / 1000) % 2_000_000_000;
   private traffic: TrafficSnapshot = { rxBytes: 0, txBytes: 0, rxPackets: 0, txPackets: 0, forwardedPackets: 0, unroutablePackets: 0, invalidPackets: 0 };
   private lastDirectorySync = 0;
   private directorySyncQueued = false;
@@ -27,6 +68,7 @@ export class RelayRoom implements DurableObject {
     if (url.pathname === '/peers') return Response.json({ peers: this.snapshot(roomId).peers });
     if (url.pathname === '/events') return Response.json({ events: this.events });
     if (url.pathname === '/traffic') return Response.json(this.traffic);
+    if (url.pathname === '/topology') return Response.json(this.snapshotTopology(roomId));
     return Response.json(this.snapshot(roomId));
   }
 
@@ -41,38 +83,186 @@ export class RelayRoom implements DurableObject {
     server.accept();
     server.binaryType = 'arraybuffer';
     const now = new Date().toISOString();
-    const session: Session = { sessionId: crypto.randomUUID(), roomId, connected: true, connectedAt: now, lastSeen: now, rxBytes: 0, txBytes: 0, rxPackets: 0, txPackets: 0, invalidPackets: 0, ws: server };
+    const session: Session = {
+      sessionId: crypto.randomUUID(),
+      roomId,
+      connected: true,
+      connectedAt: now,
+      lastSeen: now,
+      rxBytes: 0,
+      txBytes: 0,
+      rxPackets: 0,
+      txPackets: 0,
+      invalidPackets: 0,
+      ws: server,
+      messageQueue: Promise.resolve(),
+    };
     this.sessions.set(session.sessionId, session);
     this.addEvent(roomId, 'connected', 'websocket connected', session);
     this.queueDirectorySync(roomId, true);
-    server.addEventListener('message', (event) => this.onMessage(session, event));
+    server.addEventListener('message', (event) => this.enqueueMessage(session, event));
     server.addEventListener('close', () => this.disconnect(session));
     server.addEventListener('error', () => this.disconnect(session));
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  private onMessage(session: Session, event: MessageEvent): void {
-    const frame = toArrayBuffer(event.data);
+  private enqueueMessage(session: Session, event: MessageEvent): void {
+    const run = session.messageQueue.then(() => this.onMessage(session, event));
+    session.messageQueue = run.catch(() => undefined);
+    this.state.waitUntil(run.catch(() => this.invalid(session, 'message handling failed')));
+  }
+
+  private async onMessage(session: Session, event: MessageEvent): Promise<void> {
+    const message = toArrayBuffer(event.data);
     session.lastSeen = new Date().toISOString();
-    if (!frame) return this.invalid(session, 'unsupported websocket frame type');
-    session.rxBytes += frame.byteLength;
-    session.rxPackets += 1;
-    this.traffic.rxBytes += frame.byteLength;
-    this.traffic.rxPackets += 1;
-    if (frame.byteLength > MAX_FRAME_SIZE) return this.invalid(session, 'frame size limit exceeded');
+    if (!message) return this.invalid(session, 'unsupported websocket frame type');
+    session.rxBytes += message.byteLength;
+    this.traffic.rxBytes += message.byteLength;
+    if (message.byteLength > MAX_FRAME_SIZE) return this.invalid(session, 'frame size limit exceeded');
+    const frames = splitEasyTierFrames(message);
+    if (!frames) return this.invalid(session, `invalid EasyTier packet header or length (${describeFrameSplitFailure(message)})`);
+    for (const frame of frames) await this.onEasyTierFrame(session, frame);
+  }
+
+  private async onEasyTierFrame(session: Session, frame: ArrayBuffer): Promise<void> {
     const header = parseEasyTierHeader(frame);
     if (!header || !payloadLengthMatches(frame, header)) return this.invalid(session, 'invalid EasyTier packet header or length');
+    session.rxPackets += 1;
+    this.traffic.rxPackets += 1;
     if (header.fromPeerId) this.bindPeer(session, header.fromPeerId);
+    const payload = new Uint8Array(frame, EASYTIER_HEADER_SIZE);
     if (header.packetType === EasyTierPacketType.HandShake) {
+      await this.handleHandshake(session, header, payload, frame);
+      return;
+    }
+    if (header.packetType === EasyTierPacketType.Ping) {
+      this.sendFrame(session, header.fromPeerId, EasyTierPacketType.Pong, payload);
+      return;
+    }
+    if (header.packetType === EasyTierPacketType.RpcReq || header.packetType === EasyTierPacketType.RpcResp) {
+      if (await this.handleRpc(session, header, payload, frame)) return;
+    }
+    this.forwardOrRecordUnroutable(session, header, frame);
+  }
+
+  private async handleHandshake(session: Session, header: EasyTierPacketHeader, payload: Uint8Array, frame: ArrayBuffer): Promise<void> {
+    let clientReq;
+    try {
+      clientReq = decodeHandshake(payload);
+    } catch {
       const observed = observeHandshake(header, frame);
       session.networkName = observed.networkName ?? session.networkName;
       session.networkSecretDigestPrefix = observed.networkSecretDigestPrefix ?? session.networkSecretDigestPrefix;
       this.addEvent(session.roomId, 'handshake_seen', `handshake observed (${observed.confidence})`, session);
+      return;
     }
-    if (header.packetType === EasyTierPacketType.RpcReq || header.packetType === EasyTierPacketType.RpcResp) {
+
+    this.bindPeer(session, clientReq.myPeerId || header.fromPeerId);
+    session.networkName = clientReq.networkName || session.networkName;
+    session.networkSecretDigestPrefix = hex(clientReq.networkSecretDigest).slice(0, 12) || undefined;
+
+    if ((clientReq.magic >>> 0) !== EASYTIER_MAGIC || clientReq.version !== EASYTIER_VERSION) {
+      this.addEvent(session.roomId, 'decode_error', 'handshake protocol mismatch', session);
+      session.ws.close(1008, 'protocol mismatch');
+      return;
+    }
+
+    const networkName = this.expectedNetworkName(session.roomId);
+    const networkSecret = this.networkSecretFor(session.roomId, networkName);
+    if (clientReq.networkName !== networkName) {
+      this.addEvent(session.roomId, 'decode_error', `handshake network mismatch for ${clientReq.networkName || 'unknown'}`, session);
+      session.ws.close(1008, 'network mismatch');
+      return;
+    }
+    if (!networkSecret) {
+      this.addEvent(session.roomId, 'handshake_seen', 'handshake observed; network secret is not configured', session);
+      return;
+    }
+
+    const response = buildHandshakeResponse(clientReq, networkName, networkSecret);
+    if (!bytesEqual(clientReq.networkSecretDigest, response.networkSecretDigest)) {
+      this.addEvent(session.roomId, 'decode_error', 'handshake secret digest mismatch', session);
+      session.ws.close(1008, 'network secret mismatch');
+      return;
+    }
+
+    session.keys = deriveKeys(networkSecret);
+    session.handshakeAccepted = true;
+    session.serverSessionId = session.serverSessionId ?? randomU64();
+    this.sendFrame(session, clientReq.myPeerId, EasyTierPacketType.HandShake, encodeHandshake(response));
+    this.addEvent(session.roomId, 'handshake_seen', 'handshake accepted', session);
+    this.queueDirectorySync(session.roomId, true);
+    this.state.waitUntil(this.bootstrapControlPlane(session, clientReq.myPeerId).catch(() => {
+      this.addEvent(session.roomId, 'decode_error', 'control-plane bootstrap failed', session);
+    }));
+  }
+
+  private async handleRpc(session: Session, header: EasyTierPacketHeader, payload: Uint8Array, frame: ArrayBuffer): Promise<boolean> {
+    const targetIsEdge = header.toPeerId === 0 || header.toPeerId === EDGE_PEER_ID;
+    let body = payload;
+    if ((header.flags & 1) === 1) {
+      if (!session.keys) {
+        this.addEvent(session.roomId, 'decode_error', 'encrypted RPC received before accepted handshake', session);
+        return targetIsEdge;
+      }
+      try {
+        body = await decryptEasyTierPayload(payload, session.keys);
+      } catch {
+        this.addEvent(session.roomId, 'decode_error', 'encrypted RPC decrypt failed', session);
+        return targetIsEdge;
+      }
+    }
+
+    let decoded: DecodedEasyTierRpc;
+    try {
+      decoded = decodeEasyTierRpcPayload(body);
+    } catch {
       const rpc = observeRpc(header, frame);
       this.addEvent(session.roomId, 'rpc_seen', rpc.message, session);
+      return false;
     }
+
+    this.addEvent(session.roomId, 'rpc_seen', decoded.message, session);
+    let routeChanged = false;
+    if (decoded.syncRouteInfo) {
+      session.ospfDescriptor = decoded.descriptor ?? session.ospfDescriptor;
+      routeChanged = this.applySyncRouteInfo(session, decoded.syncRouteInfo);
+    }
+    if (decoded.reportPeers) this.applyPeerCenterReport(session, decoded.reportPeers);
+    if (decoded.globalPeerMap) this.applyPeerCenterGlobalMap(session, decoded.globalPeerMap);
+    if (decoded.unsupportedCompression) return targetIsEdge;
+
+    const shouldRespond = header.packetType === EasyTierPacketType.RpcReq && targetIsEdge;
+    if (shouldRespond && decoded.service === 'OspfRouteRpc.SyncRouteInfo' && decoded.syncRouteInfo) {
+      const sessionId = session.serverSessionId ?? randomU64();
+      session.serverSessionId = sessionId;
+      const response = encodeSyncRouteInfoResponse({ isInitiator: !Boolean(decoded.syncRouteInfo.isInitiator), sessionId });
+      await this.sendRpcResponse(session, header.fromPeerId, decoded, response);
+      await this.pushRouteUpdateTo(session, header.fromPeerId, decoded.descriptor, routeChanged);
+      if (routeChanged) await this.broadcastRouteUpdates(session, decoded.descriptor);
+      return true;
+    }
+
+    if (shouldRespond && decoded.service === 'PeerCenterRpc.ReportPeers') {
+      await this.sendRpcResponse(session, header.fromPeerId, decoded, encodeReportPeersResponse());
+      return true;
+    }
+
+    if (shouldRespond && decoded.service === 'PeerCenterRpc.GetGlobalPeerMap') {
+      const globalPeerMap = this.buildPeerCenterGlobalMap();
+      const digest = peerCenterDigest(globalPeerMap);
+      const requestDigest = decoded.getGlobalPeerMap?.digest ?? 0n;
+      const response = requestDigest !== 0n && requestDigest === digest
+        ? encodeGetGlobalPeerMapResponse({})
+        : encodeGetGlobalPeerMapResponse({ globalPeerMap, digest });
+      await this.sendRpcResponse(session, header.fromPeerId, decoded, response);
+      return true;
+    }
+
+    return targetIsEdge;
+  }
+
+  private forwardOrRecordUnroutable(session: Session, header: EasyTierPacketHeader, frame: ArrayBuffer): void {
     const targetSessionId = header.toPeerId ? this.peers.get(header.toPeerId) : undefined;
     const target = targetSessionId ? this.sessions.get(targetSessionId) : undefined;
     if (!target || target.sessionId === session.sessionId) {
@@ -91,7 +281,181 @@ export class RelayRoom implements DurableObject {
     this.queueDirectorySync(session.roomId);
   }
 
+  private async sendRpcResponse(session: Session, toPeerId: number, decoded: DecodedEasyTierRpc, responseBody: Uint8Array): Promise<void> {
+    let payload = buildRpcResponsePayload(decoded.packet, responseBody);
+    const declaredLen = payload.length;
+    let flags = 0;
+    if (session.keys) {
+      payload = await encryptAesGcm(payload, session.keys.key128);
+      flags = 1;
+    }
+    this.sendFrame(session, toPeerId, EasyTierPacketType.RpcResp, payload, flags, declaredLen);
+  }
+
+  private async sendRpcRequest(session: Session, toPeerId: number, descriptor: DecodedEasyTierRpc['descriptor'], requestBody: Uint8Array): Promise<void> {
+    let payload = buildRpcRequestPayload({
+      fromPeer: EDGE_PEER_ID,
+      toPeer: toPeerId,
+      transactionId: randomU64(),
+      descriptor: descriptor ?? normalizeOspfDescriptor(session.ospfDescriptor),
+      requestBody,
+      timeoutMs: 5_000,
+    });
+    const declaredLen = payload.length;
+    let flags = 0;
+    if (session.keys) {
+      payload = await encryptAesGcm(payload, session.keys.key128);
+      flags = 1;
+    }
+    this.sendFrame(session, toPeerId, EasyTierPacketType.RpcReq, payload, flags, declaredLen);
+  }
+
+  private async bootstrapControlPlane(session: Session, toPeerId: number): Promise<void> {
+    if (!session.handshakeAccepted || !session.keys || !toPeerId) return;
+    await this.pushRouteUpdateTo(session, toPeerId, undefined, true);
+    await this.sendRpcRequest(session, toPeerId, peerCenterDescriptor(2), encodeGetGlobalPeerMapRequest(0n));
+    this.addEvent(session.roomId, 'rpc_seen', `peer center global map requested from peer ${toPeerId}`, session);
+  }
+
+  private sendFrame(session: Session, toPeerId: number, packetType: EasyTierPacketType, payload: Uint8Array, flags = 0, declaredLen = payload.length): void {
+    if (!toPeerId) return;
+    const frame = createEasyTierFrame({ fromPeerId: EDGE_PEER_ID, toPeerId, packetType, flags, forwardCounter: 1, reserved: 0, len: declaredLen }, payload);
+    session.ws.send(frame);
+    session.txBytes += frame.byteLength;
+    session.txPackets += 1;
+    this.traffic.txBytes += frame.byteLength;
+    this.traffic.txPackets += 1;
+  }
+
+  private applySyncRouteInfo(session: Session, req: SyncRouteInfoRequest): boolean {
+    const now = new Date().toISOString();
+    let changed = false;
+    for (const info of req.peerInfos) {
+      if (!info.peerId) continue;
+      const snapshot = routePeerSnapshot(info, now, req.myPeerId);
+      const previous = this.rawRoutePeerInfos.get(info.peerId);
+      if (!previous || routePeerInfoSignature(previous) !== routePeerInfoSignature(info)) changed = true;
+      this.rawRoutePeerInfos.set(info.peerId, cloneRoutePeerInfo(info));
+      this.routePeers.set(info.peerId, snapshot);
+      const directSessionId = this.peers.get(info.peerId);
+      const directSession = directSessionId ? this.sessions.get(directSessionId) : undefined;
+      if (directSession) applyRouteFields(directSession, snapshot);
+      if (session.peerId === info.peerId) applyRouteFields(session, snapshot);
+    }
+    if (req.connBitmap) {
+      const nextEdges = edgesFromConnBitmap(req.connBitmap);
+      if (topologyEdgeSignature(nextEdges) !== topologyEdgeSignature(this.connBitmapEdges)) changed = true;
+      this.connBitmapEdges = nextEdges;
+    }
+    if (changed) this.routeVersion += 1;
+    this.topologyUpdatedAt = now;
+    this.queueDirectorySync(session.roomId);
+    return changed;
+  }
+
+  private async pushRouteUpdateTo(session: Session, toPeerId: number, descriptor: DecodedEasyTierRpc['descriptor'], force = false): Promise<void> {
+    const now = Date.now();
+    if (!force && session.lastRoutePushAt && now - session.lastRoutePushAt < ROUTE_PUSH_MIN_MS) return;
+    const request = this.buildSyncRouteInfoRequest(session, toPeerId);
+    if (request.peerInfos.length === 0 && !request.connBitmap) return;
+    await this.sendRpcRequest(session, toPeerId, descriptor, encodeSyncRouteInfoRequest(request));
+    session.lastRoutePushAt = now;
+    this.addEvent(session.roomId, 'rpc_seen', `route update pushed to peer ${toPeerId}`, session);
+  }
+
+  private async broadcastRouteUpdates(source: Session, descriptor: DecodedEasyTierRpc['descriptor']): Promise<void> {
+    const updates: Promise<void>[] = [];
+    for (const session of this.sessions.values()) {
+      if (session.sessionId === source.sessionId || !session.peerId || !session.handshakeAccepted) continue;
+      updates.push(this.pushRouteUpdateTo(session, session.peerId, descriptor, true));
+    }
+    await Promise.all(updates);
+  }
+
+  private buildSyncRouteInfoRequest(session: Session, targetPeerId: number): SyncRouteInfoRequest {
+    const peerInfos = this.routePeerInfosForUpdate();
+    const peerIds = [...new Set([EDGE_PEER_ID, targetPeerId, ...this.rawRoutePeerInfos.keys(), ...this.peers.keys()])]
+      .filter((peerId) => peerId > 0)
+      .sort((a, b) => a - b);
+    return {
+      myPeerId: EDGE_PEER_ID,
+      mySessionId: session.serverSessionId,
+      isInitiator: false,
+      peerInfos,
+      connBitmap: peerIds.length > 0 ? fullMeshConnBitmap(peerIds, this.routeVersion) : undefined,
+    };
+  }
+
+  private routePeerInfosForUpdate(): RoutePeerInfo[] {
+    const infos = new Map<number, RoutePeerInfo>();
+    infos.set(EDGE_PEER_ID, {
+      peerId: EDGE_PEER_ID,
+      cost: 1,
+      proxyCidrs: [],
+      hostname: 'edgetier-worker',
+      version: this.routeVersion,
+      easytierVersion: 'edgetier-worker',
+      networkLength: firstNetworkLength(this.rawRoutePeerInfos) ?? 24,
+    });
+    for (const [peerId, info] of this.rawRoutePeerInfos.entries()) {
+      infos.set(peerId, cloneRoutePeerInfo({ ...info, version: info.version ?? this.routeVersion }));
+    }
+    return [...infos.values()].sort((a, b) => a.peerId - b.peerId);
+  }
+
+  private applyPeerCenterReport(session: Session, req: ReportPeersRequest): void {
+    const sourcePeerId = req.myPeerId ?? session.peerId;
+    if (!sourcePeerId) return;
+    const now = new Date().toISOString();
+    this.peerCenter.set(sourcePeerId, { directPeers: cloneDirectPeers(req.peerInfos), lastSeen: now });
+    this.peerCenterEdges = edgesFromPeerCenter(this.peerCenter);
+    this.topologyUpdatedAt = now;
+    this.queueDirectorySync(session.roomId);
+  }
+
+  private applyPeerCenterGlobalMap(session: Session, globalPeerMap: PeerCenterGlobalMap): void {
+    const now = new Date().toISOString();
+    for (const [peerId, peerInfo] of globalPeerMap.entries()) {
+      this.peerCenter.set(peerId, { directPeers: cloneDirectPeers(peerInfo), lastSeen: now });
+    }
+    this.peerCenterEdges = edgesFromPeerCenter(this.peerCenter);
+    this.topologyUpdatedAt = now;
+    this.queueDirectorySync(session.roomId);
+  }
+
+  private buildPeerCenterGlobalMap(): PeerCenterGlobalMap {
+    const map: PeerCenterGlobalMap = new Map();
+    const ensure = (peerId: number): PeerInfoForGlobalMap => {
+      let peerInfo = map.get(peerId);
+      if (!peerInfo) {
+        peerInfo = { directPeers: new Map() };
+        map.set(peerId, peerInfo);
+      }
+      return peerInfo;
+    };
+
+    for (const [peerId, info] of this.peerCenter.entries()) {
+      const peerInfo = ensure(peerId);
+      for (const [toPeerId, directInfo] of info.directPeers.entries()) {
+        peerInfo.directPeers.set(toPeerId, { latencyMs: directInfo.latencyMs });
+        ensure(toPeerId);
+      }
+    }
+
+    for (const peerId of this.routePeers.keys()) ensure(peerId);
+    for (const session of this.sessions.values()) {
+      if (!session.peerId) continue;
+      ensure(session.peerId).directPeers.set(EDGE_PEER_ID, { latencyMs: 0 });
+      ensure(EDGE_PEER_ID).directPeers.set(session.peerId, { latencyMs: 0 });
+    }
+
+    return sortPeerCenterMap(map);
+  }
+
   private bindPeer(session: Session, peerId: number): void {
+    if (session.peerId && session.peerId !== peerId && this.peers.get(session.peerId) === session.sessionId) {
+      this.peers.delete(session.peerId);
+    }
     session.peerId = peerId;
     this.peers.set(peerId, session.sessionId);
   }
@@ -107,7 +471,8 @@ export class RelayRoom implements DurableObject {
   private disconnect(session: Session): void {
     if (!this.sessions.has(session.sessionId)) return;
     this.sessions.delete(session.sessionId);
-    if (session.peerId) this.peers.delete(session.peerId);
+    if (session.peerId && this.peers.get(session.peerId) === session.sessionId) this.peers.delete(session.peerId);
+    if (session.peerId) this.removePeerCenterPeer(session.peerId);
     session.connected = false;
     this.addEvent(session.roomId, 'disconnected', 'websocket disconnected', session);
     this.queueDirectorySync(session.roomId, true);
@@ -122,6 +487,12 @@ export class RelayRoom implements DurableObject {
     const body = await request.json().catch(() => ({})) as { count?: number; clear?: boolean };
     if (body.clear) {
       this.seededPeers = [];
+      this.routePeers = new Map();
+      this.rawRoutePeerInfos = new Map();
+      this.connBitmapEdges = [];
+      this.peerCenter = new Map();
+      this.peerCenterEdges = [];
+      this.topologyUpdatedAt = undefined;
       this.events = [];
       this.traffic = { rxBytes: 0, txBytes: 0, rxPackets: 0, txPackets: 0, forwardedPackets: 0, unroutablePackets: 0, invalidPackets: 0 };
       this.queueDirectorySync(roomId, true);
@@ -166,12 +537,145 @@ export class RelayRoom implements DurableObject {
   }
 
   private snapshot(roomId: string): RoomSnapshot {
-    const livePeers = [...this.sessions.values()].map(({ ws: _ws, invalidPackets: _invalidPackets, ...peer }) => peer);
-    const peers = [...livePeers, ...this.seededPeers];
+    this.pruneStaleRouteState();
+    const livePeers = [...this.sessions.values()].map(({ ws: _ws, invalidPackets: _invalidPackets, messageQueue: _messageQueue, keys: _keys, serverSessionId: _serverSessionId, handshakeAccepted: _handshakeAccepted, ...peer }) => peer);
+    const livePeerIds = new Set(livePeers.map((peer) => peer.peerId).filter((peerId): peerId is number => peerId !== undefined));
+    const routeOnlyPeers: PeerSnapshot[] = [...this.routePeers.values()]
+      .filter((peer) => !livePeerIds.has(peer.peerId))
+      .map((peer) => ({
+        sessionId: `route-${peer.peerId}`,
+        roomId,
+        peerId: peer.peerId,
+        hostname: peer.hostname,
+        virtualIpv4: peer.virtualIpv4,
+        virtualIpv6: peer.virtualIpv6,
+        udpNatType: peer.udpNatType,
+        tcpNatType: peer.tcpNatType,
+        proxyCidrs: peer.proxyCidrs,
+        easytierVersion: peer.easytierVersion,
+        routeVersion: peer.routeVersion,
+        peerRouteId: peer.peerRouteId,
+        networkLength: peer.networkLength,
+        cost: peer.cost,
+        connected: false,
+        connectedAt: peer.lastSeen,
+        lastSeen: peer.lastSeen,
+        rxBytes: 0,
+        txBytes: 0,
+        rxPackets: 0,
+        txPackets: 0,
+      }));
     const lastActivity = this.events.at(-1)?.timestamp;
-    const peerCount = this.peers.size + this.seededPeers.length;
+    const includeEdgePeer = this.hasObservedNetworkState();
+    const edgePeer: PeerSnapshot[] = includeEdgePeer ? [{
+      sessionId: `local-${EDGE_PEER_ID}`,
+      roomId,
+      peerId: EDGE_PEER_ID,
+      networkName: this.expectedNetworkName(roomId),
+      hostname: 'edgetier-worker',
+      proxyCidrs: [],
+      easytierVersion: 'edgetier-worker',
+      routeVersion: this.routeVersion,
+      networkLength: firstNetworkLength(this.rawRoutePeerInfos) ?? 24,
+      connected: this.sessions.size > 0,
+      connectedAt: this.events[0]?.timestamp ?? lastActivity ?? new Date().toISOString(),
+      lastSeen: lastActivity ?? new Date().toISOString(),
+      rxBytes: 0,
+      txBytes: 0,
+      rxPackets: 0,
+      txPackets: 0,
+    }] : [];
+    const peers = [...edgePeer, ...livePeers, ...routeOnlyPeers, ...this.seededPeers];
+    const peerIds = new Set<number>();
+    if (includeEdgePeer) peerIds.add(EDGE_PEER_ID);
+    for (const peerId of this.peers.keys()) peerIds.add(peerId);
+    for (const peerId of this.routePeers.keys()) peerIds.add(peerId);
+    const peerCount = peerIds.size + this.seededPeers.length;
     const websocketCount = this.sessions.size + this.seededPeers.length;
-    return { roomId, peerCount, websocketCount, bytes: this.traffic.rxBytes + this.traffic.txBytes, lastActivity, traffic: this.traffic, peers, recentEvents: this.events.slice(-50) };
+    return { roomId, peerCount, websocketCount, bytes: this.traffic.rxBytes + this.traffic.txBytes, lastActivity, traffic: this.traffic, peers, recentEvents: this.events.slice(-50), topology: this.snapshotTopology(roomId) };
+  }
+
+  private snapshotTopology(roomId: string): TopologySnapshot {
+    this.pruneStaleRouteState();
+    const nodes = new Map<number, RoutePeerSnapshot>();
+    for (const peer of this.routePeers.values()) nodes.set(peer.peerId, peer);
+    if (this.hasObservedNetworkState()) {
+      nodes.set(EDGE_PEER_ID, {
+        peerId: EDGE_PEER_ID,
+        hostname: 'edgetier-worker',
+        proxyCidrs: [],
+        easytierVersion: 'edgetier-worker',
+        routeVersion: this.routeVersion,
+        networkLength: firstNetworkLength(this.rawRoutePeerInfos) ?? 24,
+        lastSeen: this.topologyUpdatedAt ?? this.events.at(-1)?.timestamp ?? new Date().toISOString(),
+      });
+    }
+    for (const [peerId, info] of this.peerCenter.entries()) {
+      if (!nodes.has(peerId)) nodes.set(peerId, { peerId, proxyCidrs: [], lastSeen: info.lastSeen });
+      for (const toPeerId of info.directPeers.keys()) {
+        if (!nodes.has(toPeerId)) nodes.set(toPeerId, { peerId: toPeerId, proxyCidrs: [], lastSeen: info.lastSeen });
+      }
+    }
+
+    return {
+      roomId,
+      nodes: [...nodes.values()].sort((a, b) => a.peerId - b.peerId),
+      edges: mergeTopologyEdges(this.connBitmapEdges, this.peerCenterEdges),
+      ...(this.topologyUpdatedAt ? { updatedAt: this.topologyUpdatedAt } : {}),
+    };
+  }
+
+  private hasObservedNetworkState(): boolean {
+    return this.sessions.size > 0 || this.routePeers.size > 0 || this.peerCenter.size > 0;
+  }
+
+  private expectedNetworkName(roomId: string): string {
+    return this.env.EASYTIER_NETWORK_NAME || roomId;
+  }
+
+  private networkSecretFor(roomId: string, networkName: string): string | undefined {
+    const mapped = parseNetworkSecretMap(this.env.EASYTIER_NETWORK_SECRETS);
+    return mapped.get(networkName) ?? mapped.get(roomId) ?? this.env.EASYTIER_NETWORK_SECRET;
+  }
+
+  private removePeerCenterPeer(peerId: number): void {
+    this.peerCenter.delete(peerId);
+    for (const info of this.peerCenter.values()) info.directPeers.delete(peerId);
+    this.peerCenterEdges = edgesFromPeerCenter(this.peerCenter);
+  }
+
+  private pruneStaleRouteState(now = Date.now()): void {
+    let changed = false;
+    for (const [peerId, peer] of this.routePeers.entries()) {
+      if (this.peers.has(peerId)) continue;
+      const lastSeen = Date.parse(peer.lastSeen);
+      if (!Number.isFinite(lastSeen) || now - lastSeen > ROUTE_STATE_TTL_MS) {
+        this.routePeers.delete(peerId);
+        this.rawRoutePeerInfos.delete(peerId);
+        changed = true;
+      }
+    }
+
+    for (const [peerId, info] of this.peerCenter.entries()) {
+      if (this.peers.has(peerId)) continue;
+      const lastSeen = Date.parse(info.lastSeen);
+      if (!Number.isFinite(lastSeen) || now - lastSeen > ROUTE_STATE_TTL_MS) {
+        this.peerCenter.delete(peerId);
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      for (const peerId of this.rawRoutePeerInfos.keys()) {
+        if (!this.routePeers.has(peerId)) this.rawRoutePeerInfos.delete(peerId);
+      }
+      for (const info of this.peerCenter.values()) {
+        for (const peerId of info.directPeers.keys()) {
+          if (!this.routePeers.has(peerId) && !this.peers.has(peerId)) info.directPeers.delete(peerId);
+        }
+      }
+      this.peerCenterEdges = edgesFromPeerCenter(this.peerCenter);
+    }
   }
 
   private queueDirectorySync(roomId: string, immediate = false): void {
@@ -223,4 +727,224 @@ export function toArrayBuffer(data: unknown): ArrayBuffer | null {
     return copy.buffer;
   }
   return null;
+}
+
+async function decryptEasyTierPayload(payload: Uint8Array, keys: DerivedKeys): Promise<Uint8Array> {
+  try {
+    return await decryptAesGcm(payload, keys.key128);
+  } catch {
+    return decryptAesGcm(payload, keys.key256);
+  }
+}
+
+function randomU64(): bigint {
+  const words = crypto.getRandomValues(new Uint32Array(2));
+  return (BigInt(words[0]) << 32n) | BigInt(words[1]);
+}
+
+function routePeerSnapshot(info: RoutePeerInfo, lastSeen: string, sourcePeerId?: number): RoutePeerSnapshot {
+  return {
+    peerId: info.peerId,
+    hostname: info.hostname,
+    virtualIpv4: formatIpv4Cidr(info),
+    virtualIpv6: info.ipv6,
+    udpNatType: natTypeName(info.udpNatType),
+    tcpNatType: natTypeName(info.tcpNatType),
+    proxyCidrs: info.proxyCidrs,
+    easytierVersion: info.easytierVersion,
+    routeVersion: info.version,
+    peerRouteId: info.peerRouteId,
+    networkLength: info.networkLength,
+    cost: info.cost,
+    sourcePeerId,
+    lastSeen,
+  };
+}
+
+function applyRouteFields(peer: PeerSnapshot, route: RoutePeerSnapshot): void {
+  peer.hostname = route.hostname;
+  peer.virtualIpv4 = route.virtualIpv4;
+  peer.virtualIpv6 = route.virtualIpv6;
+  peer.udpNatType = route.udpNatType;
+  peer.tcpNatType = route.tcpNatType;
+  peer.proxyCidrs = route.proxyCidrs;
+  peer.easytierVersion = route.easytierVersion;
+  peer.routeVersion = route.routeVersion;
+  peer.peerRouteId = route.peerRouteId;
+  peer.networkLength = route.networkLength;
+  peer.cost = route.cost;
+}
+
+function formatIpv4Cidr(info: RoutePeerInfo): string | undefined {
+  if (!info.ipv4) return undefined;
+  return info.networkLength ? `${info.ipv4}/${info.networkLength}` : info.ipv4;
+}
+
+function normalizeOspfDescriptor(descriptor: DecodedEasyTierRpc['descriptor']): NonNullable<DecodedEasyTierRpc['descriptor']> {
+  return {
+    domainName: descriptor?.domainName ?? 'public_server',
+    protoName: descriptor?.protoName ?? 'peer_rpc',
+    serviceName: descriptor?.serviceName ?? 'OspfRouteRpc',
+    methodIndex: descriptor?.methodIndex ?? 1,
+  };
+}
+
+function peerCenterDescriptor(methodIndex: number): NonNullable<DecodedEasyTierRpc['descriptor']> {
+  return {
+    domainName: 'public_server',
+    protoName: 'peer_rpc',
+    serviceName: 'PeerCenterRpc',
+    methodIndex,
+  };
+}
+
+function cloneRoutePeerInfo(info: RoutePeerInfo): RoutePeerInfo {
+  return {
+    peerId: info.peerId,
+    cost: info.cost,
+    ipv4: info.ipv4,
+    ipv6: info.ipv6,
+    proxyCidrs: [...info.proxyCidrs],
+    hostname: info.hostname,
+    udpNatType: info.udpNatType,
+    tcpNatType: info.tcpNatType,
+    version: info.version,
+    easytierVersion: info.easytierVersion,
+    peerRouteId: info.peerRouteId,
+    networkLength: info.networkLength,
+  };
+}
+
+function routePeerInfoSignature(info: RoutePeerInfo): string {
+  return JSON.stringify([
+    info.peerId,
+    info.cost,
+    info.ipv4,
+    info.ipv6,
+    info.proxyCidrs,
+    info.hostname,
+    info.udpNatType,
+    info.tcpNatType,
+    info.version,
+    info.easytierVersion,
+    info.peerRouteId,
+    info.networkLength,
+  ]);
+}
+
+function topologyEdgeSignature(edges: TopologyEdge[]): string {
+  return JSON.stringify([...edges].sort(compareTopologyEdges).map((edge) => [edge.fromPeerId, edge.toPeerId, edge.source, edge.latencyMs]));
+}
+
+function firstNetworkLength(infos: Map<number, RoutePeerInfo>): number | undefined {
+  for (const info of infos.values()) {
+    if (info.networkLength) return info.networkLength;
+  }
+  return undefined;
+}
+
+function fullMeshConnBitmap(peerIds: number[], version: number): RouteConnBitmap {
+  const size = peerIds.length;
+  const bitmap = new Uint8Array(Math.ceil((size * size) / 8));
+  for (let row = 0; row < size; row += 1) {
+    for (let col = 0; col < size; col += 1) {
+      const bitIndex = row * size + col;
+      bitmap[Math.floor(bitIndex / 8)] |= 1 << (bitIndex % 8);
+    }
+  }
+  return { peerIds: peerIds.map((peerId) => ({ peerId, version })), bitmap };
+}
+
+function edgesFromConnBitmap(conn: RouteConnBitmap): TopologyEdge[] {
+  const peers = conn.peerIds.map((item) => item.peerId);
+  const size = peers.length;
+  const edges: TopologyEdge[] = [];
+  for (let row = 0; row < size; row += 1) {
+    for (let col = 0; col < size; col += 1) {
+      if (row === col) continue;
+      const bitIndex = row * size + col;
+      const byte = conn.bitmap[Math.floor(bitIndex / 8)] ?? 0;
+      if ((byte & (1 << (bitIndex % 8))) !== 0) {
+        edges.push({ fromPeerId: peers[row], toPeerId: peers[col], source: 'conn_bitmap' });
+      }
+    }
+  }
+  return edges;
+}
+
+function edgesFromPeerCenter(peerCenter: Map<number, { directPeers: Map<number, DirectConnectedPeerInfo> }>): TopologyEdge[] {
+  const edges: TopologyEdge[] = [];
+  for (const [fromPeerId, info] of peerCenter.entries()) {
+    for (const [toPeerId, directInfo] of info.directPeers.entries()) {
+      if (!fromPeerId || !toPeerId || fromPeerId === toPeerId) continue;
+      edges.push({ fromPeerId, toPeerId, source: 'peer_center', latencyMs: directInfo.latencyMs });
+    }
+  }
+  return edges.sort(compareTopologyEdges);
+}
+
+function mergeTopologyEdges(...groups: TopologyEdge[][]): TopologyEdge[] {
+  const byKey = new Map<string, TopologyEdge>();
+  for (const edge of groups.flat()) {
+    const key = `${edge.source}:${edge.fromPeerId}:${edge.toPeerId}`;
+    byKey.set(key, edge);
+  }
+  return [...byKey.values()].sort(compareTopologyEdges);
+}
+
+function compareTopologyEdges(a: TopologyEdge, b: TopologyEdge): number {
+  return a.fromPeerId - b.fromPeerId || a.toPeerId - b.toPeerId || a.source.localeCompare(b.source);
+}
+
+function cloneDirectPeers(peerInfo: PeerInfoForGlobalMap): Map<number, DirectConnectedPeerInfo> {
+  const directPeers = new Map<number, DirectConnectedPeerInfo>();
+  for (const [peerId, info] of peerInfo.directPeers.entries()) {
+    directPeers.set(peerId, { latencyMs: info.latencyMs });
+  }
+  return directPeers;
+}
+
+function sortPeerCenterMap(map: PeerCenterGlobalMap): PeerCenterGlobalMap {
+  const sorted: PeerCenterGlobalMap = new Map();
+  for (const [peerId, peerInfo] of [...map.entries()].sort(([left], [right]) => left - right)) {
+    sorted.set(peerId, {
+      directPeers: new Map([...peerInfo.directPeers.entries()].sort(([left], [right]) => left - right)),
+    });
+  }
+  return sorted;
+}
+
+function peerCenterDigest(map: PeerCenterGlobalMap): bigint {
+  const stable = JSON.stringify([...map.entries()].map(([peerId, peerInfo]) => [
+    peerId,
+    [...peerInfo.directPeers.entries()].map(([toPeerId, info]) => [toPeerId, info.latencyMs]),
+  ]));
+  let hash = 0n;
+  for (let index = 0; index < stable.length; index += 1) {
+    hash = ((hash << 5n) - hash + BigInt(stable.charCodeAt(index))) & 0xffff_ffff_ffff_ffffn;
+  }
+  return hash;
+}
+
+function parseNetworkSecretMap(raw: string | undefined): Map<string, string> {
+  if (!raw) return new Map();
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return new Map();
+    const out = new Map<string, string>();
+    for (const [key, value] of Object.entries(parsed)) {
+      if (typeof key === 'string' && typeof value === 'string' && value) out.set(key, value);
+    }
+    return out;
+  } catch {
+    return new Map();
+  }
+}
+
+function describeFrameSplitFailure(message: ArrayBuffer): string {
+  if (message.byteLength < EASYTIER_HEADER_SIZE) return `message_len=${message.byteLength}, header=short`;
+  const header = parseEasyTierHeader(message);
+  if (!header) return `message_len=${message.byteLength}, header=invalid`;
+  const expected = EASYTIER_HEADER_SIZE + (header.len + ((header.flags & 1) === 1 ? AEAD_TAIL_SIZE : 0));
+  return `message_len=${message.byteLength}, expected_first_frame_len=${expected}, type=${header.packetType}, flags=${header.flags}, from=${header.fromPeerId}, to=${header.toPeerId}`;
 }

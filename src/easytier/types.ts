@@ -6,6 +6,6 @@ export interface HandshakeObservation {
 }
 
 export interface RpcObservation {
-  service: 'OspfRouteRpc.SyncRouteInfo' | 'PeerCenterRpc' | 'unknown';
+  service: 'OspfRouteRpc.SyncRouteInfo' | 'PeerCenterRpc' | 'PeerCenterRpc.ReportPeers' | 'PeerCenterRpc.GetGlobalPeerMap' | 'unknown';
   message: string;
 }

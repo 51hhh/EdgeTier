@@ -75,19 +75,25 @@ secret 仅作 Worker secret;dashboard/API **绝不**明文回显 secret/完整 d
 
 → **接手前先 review 并提交工作区改动**(或基于其继续)。Phase B 主体已落地;勿重复造。
 
+**本轮新增(2026-06-13,本地验证)**:
+- W1 Zstd RPC body 解压已接入:`src/easytier/zstd.ts` 使用 Worker-compatible `fzstd`, `decodeEasyTierRpcPayload` 在 `CompressionAlgo.Zstd` 时先解压再解 `RpcRequest`/`RpcResponse`。
+- `src/easytier/rpc.test.ts` 增加压缩 `SyncRouteInfo` fixture 回归;全门禁通过(typecheck/53 tests/proto:check/build dry-run)。
+- 尚未用真实多节点压缩 route 表重新部署验证;该项仍需后续 live evidence。
+
 ---
 
 ## 4. 实现工作流（达到最大面;按优先级）
 
 > 策略:接 EdgeTier 现有鉴权/observer/面板;EdgeTier 私有鉴权门禁保持最前。每项以"真机 + 面板真实数据"验收。
 
-### W1 — Zstd 解压（🔴 最高优先,真实多节点的硬阻塞）
-现状:`rpc.ts` 检测到 `compressionInfo.algo > None(=2 Zstd)` 直接标 unsupported,**不解码**。
-真机单节点 route(223B,未压缩)能解;但 EasyTier 对 **>256 字节**的 RPC body 会 Zstd 压缩,
-**真实多节点 route 表会被压缩 → 当前解不出 → 拿不到全网信息**。
-- 任务:引入可在 Workers 跑的 **Zstd 解码**(WASM,如 `fzstd`/`@bokuweb/zstd-wasm` 之类纯 JS/WASM;不可用 node:zlib,EasyTier 用 zstd 非 gzip)。
-- 在 `decodeEasyTierRpcPayload` 中:`algo===2` 时先 zstd-decompress 再解 `RpcRequest`。
-- 验收:多节点(≥2 真实节点)组网下,EdgeTier 解出**全部**节点的 RoutePeerInfo;新增"压缩 route 表"真机向量回归测试。
+### W1 — Zstd 解压（✅ 本地已实现,仍需真实压缩向量验证）
+现状:`rpc.ts` 已在 `compressionInfo.algo === 2` 时通过 `fzstd` 解压 RPC body,再继续解
+`RpcRequest`/`RpcResponse`。本地新增压缩 `SyncRouteInfo` fixture 回归测试。
+真机单节点 route(223B,未压缩)能解;EasyTier 对 **>256 字节**的 RPC body 可能 Zstd 压缩,
+所以真实多节点 route 表仍需 live evidence。
+- 已完成:引入可在 Workers 跑的 **Zstd 解码**(`fzstd`,纯 JS/browser-compatible;未使用 node:zlib)。
+- 已完成:在 `decodeEasyTierRpcPayload` 中 `algo===2` 时先 zstd-decompress 再解 `RpcRequest`/`RpcResponse`。
+- 待验证:多节点(≥2 真实节点)组网下,EdgeTier 解出**全部**节点的 RoutePeerInfo;补"压缩 route 表"真机向量回归测试。
 
 ### W2 — 路由反射器正确性与组网收敛
 现状:已回 SyncRouteInfoResponse / Pong;但未主动**推送/广播**路由更新,EdgeTier 自身未必出现在其它节点视图。
@@ -152,7 +158,7 @@ proto/easytier/ + scripts/check-proto-drift.mjs     # proto 漂移校验
 
 ## 6. 测试与验证
 
-- **真机**:`sshpass -p '1234' ssh toe2@192.168.31.50`(Ubuntu24 x86_64),`/tmp/easytier-core`(2.6.4)+ `/tmp/et-test.toml`(含真实 secret)。该机 **DNS 坏**(下载走本机 scp)。本机 LAN IP `192.168.31.72`。
+- **真机**:`ssh toe2@192.168.31.50`(Ubuntu24 x86_64;凭据只保留在本地/会话,不写入 repo),`/tmp/easytier-core`(2.6.4)+ `/tmp/et-test.toml`(含真实 secret)。该机 **DNS 坏**(下载走本机 scp)。本机 LAN IP `192.168.31.72`。
 - **验证环(已验证可行)**:本机 `ws` 应答服务器(从 EdgeTier 目录跑)或 `wrangler dev`(`.dev.vars` 提供鉴权 secret);测试机 easytier-core `[[peer]] uri="ws://192.168.31.72:<port>/ws"` 拨入。
 - **真机向量已固化**:`handshake.test.ts`(真实 HandshakeRequest)、`realtraffic.test.ts`(真实加密 RpcReq 解密+结构化解码)。W1 需补**压缩 route 表**真机向量。
 - **多节点**:在测试机或追加机器跑 ≥2 个 easytier-core 实例(可 `no_tun=true` 免 root),验证 W1/W2。
@@ -170,7 +176,7 @@ proto/easytier/ + scripts/check-proto-drift.mjs     # proto 漂移校验
 ---
 
 ## 8. 风险
-- **Zstd(W1)**:无 WASM zstd 则真实多节点拿不到全量信息 —— 头号风险,优先解决并加压缩向量回归。
+- **Zstd(W1)**:本地压缩 RPC 回归已打通;下一次真实多节点验收需补线上压缩 route 表证据。
 - 协议版本漂移:锁 2.6.4 + `proto:check`;字段号(如 tcp NAT)核对 vendored proto。
 - DO hibernation 与控制平面一致性(W3):照搬参考方案并验证。
 - 出站 TCP(W5):TCP 帧与 WS 帧不同;`connect()` 端口/目标限制;连接保活。
@@ -182,8 +188,8 @@ proto/easytier/ + scripts/check-proto-drift.mjs     # proto 漂移校验
 ## 9. 给接手 agent 的起步清单
 1. review 并提交工作区 Phase B 改动(§3);读 `crypto/handshake/protobuf/rpc.ts` 与其测试 + 本 PRD + full-member PRD。
 2. 通读 `research/github/cf-workers-et-ws/src/worker/core/{rpc_handler,peer_manager,global_state,compress}.js`。
-3. **先做 W1(Zstd)** —— 否则真实多节点解不出全量信息;用压缩 route 表真机向量验收。
-4. 再做 W2(收敛/保活)+ W3(hibernation),让真节点长连且全网可见。
+3. W1(Zstd) 已本地实现;下一步补真实多节点压缩 route 表验收向量。
+4. 继续验证 W2(收敛/保活)+ W3(hibernation),让真节点长连且全网可见。
 5. W4 面板真实数据;W7 部署 + 真机端到端;W5/W6 视需要。
 6. 每步全门禁绿后再 commit;真机验收写脱敏 report。
 ```

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { decryptAesGcm, deriveKeys } from './crypto';
+import { decodeEasyTierRpcPayload } from './rpc';
 
 const unhex = (s: string) => new Uint8Array((s.match(/.{2}/g) ?? []).map((h) => parseInt(h, 16)));
 
@@ -21,5 +22,18 @@ describe('decrypts real easytier-core 2.6.4 control traffic', () => {
     expect(text).toContain('OspfRouteRpc');
     expect(text).toContain('toe2-ubuntu24'); // RoutePeerInfo.hostname
     expect(text).toContain('2.6.4'); // RoutePeerInfo.easytier_version
+
+    const decoded = decodeEasyTierRpcPayload(plaintext);
+    expect(decoded.service).toBe('OspfRouteRpc.SyncRouteInfo');
+    expect(decoded.syncRouteInfo?.myPeerId).toBeGreaterThan(0);
+    const peer = decoded.syncRouteInfo?.peerInfos.find((item) => item.hostname === 'toe2-ubuntu24');
+    expect(peer).toMatchObject({
+      hostname: 'toe2-ubuntu24',
+      easytierVersion: expect.stringContaining('2.6.4'),
+    });
+    expect(peer?.peerId).toBeGreaterThan(0);
+    // This capture omits proto3 default-valued NAT fields, so the stable
+    // assertion is the decoded route peer identity carried by the wire vector.
+    expect(peer?.udpNatType).toBeUndefined();
   });
 });

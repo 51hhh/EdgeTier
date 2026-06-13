@@ -8,6 +8,12 @@ const env: AuthEnv = {
   RELAY_TOKEN_SECRET: 'test-relay-secret',
 };
 
+function tamperSignature(token: string): string {
+  const parts = token.split('.');
+  parts[2] = `${parts[2][0] === 'a' ? 'b' : 'a'}${parts[2].slice(1)}`;
+  return parts.join('.');
+}
+
 describe('auth helpers', () => {
   it('creates and verifies an HTTP-only session cookie', async () => {
     const cookie = await createSessionCookie(env, 'admin', 1_000);
@@ -40,7 +46,7 @@ describe('auth helpers', () => {
     await expect(verifyRelayToken(env, null, 'home-mesh', 3_001)).resolves.toEqual({ ok: false, reason: 'missing' });
     await expect(verifyRelayToken(env, issued.token, 'other-room', 3_001)).resolves.toEqual({ ok: false, reason: 'room_mismatch' });
     await expect(verifyRelayToken(env, issued.token, 'home-mesh', 3_301)).resolves.toEqual({ ok: false, reason: 'expired' });
-    await expect(verifyRelayToken(env, `${issued.token.slice(0, -1)}x`, 'home-mesh', 3_001)).resolves.toEqual({ ok: false, reason: 'bad_signature' });
+    await expect(verifyRelayToken(env, tamperSignature(issued.token), 'home-mesh', 3_001)).resolves.toEqual({ ok: false, reason: 'bad_signature' });
   });
 
   it('rejects malformed relay token claims', async () => {

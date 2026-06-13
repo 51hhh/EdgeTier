@@ -101,7 +101,7 @@ RpcReq=8 / RpcResp=9 的 body(加密)解密后是 `common.RpcPacket` → 内含 
   - `RouteConnBitmap`:peer 连接位图 —— **拓扑边**。
   - `RouteForeignNetworkInfos`:跨网络信息。
 - **PeerCenterRpc**:`ReportPeers`(上报 directPeers+latency)/ `GetGlobalPeerMap`(`GlobalPeerMap`,含 `DirectConnectedPeerInfo.latency_ms`)—— **P2P 延迟图**。
-- RPC body 可能 gzip(`compressionInfo.algo > 1`)—— 需解压(`DecompressionStream('gzip')` 或 node:zlib via nodejs_compat)。
+- RPC body 可能 Zstd 压缩(`compressionInfo.algo = 2`)—— 需用 Worker 兼容的 Zstd 解压;不可按 gzip/node:zlib 处理。
 
 ### 2.5 参考实现(research/github,已克隆)
 - **`cf-workers-et-ws/`** —— 最完整的 JS 版 EasyTier CF Worker 服务端。直接参考/移植:
@@ -186,7 +186,7 @@ proto/easytier/    # proto 漂移校验目标(scripts/check-proto-drift.mjs)
 
 ## 5. 测试与验证方法(真机回归环)
 
-- **测试机**:`sshpass -p '1234' ssh toe2@192.168.31.50`(Ubuntu 24.04 x86_64)。
+- **测试机**:`ssh toe2@192.168.31.50`(Ubuntu 24.04 x86_64;凭据只保留在本地/会话,不写入 repo)。
   已放 `/tmp/easytier-core`、`/tmp/easytier-cli`(2.6.4)、`/tmp/et-test.toml`(含真实 secret)。
   注意:该机 **DNS 坏**(`ping 1.1.1.1` 通但解析失败)→ 下载走本机 scp。
 - **本机 LAN IP** `192.168.31.72`;测试机能反连本机端口。

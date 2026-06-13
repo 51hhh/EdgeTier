@@ -1,17 +1,19 @@
 import React, { FormEvent, useEffect, useMemo, useState } from 'react';
 import { Badge, Button, Empty, Input, LayerCard, Tabs, Text } from '@cloudflare/kumo';
-import { clearRoomSeed, createRoomRelayToken, getRoom, getRoomEvents, getRoomTraffic, getRooms, logout, seedRoom } from './api';
+import { clearRoomSeed, createRoomRelayToken, getRoom, getRoomEvents, getRoomTopology, getRoomTraffic, getRooms, logout, seedRoom } from './api';
 import { ROOM_NAME_PATTERN } from '../easytier/constants';
 import type { DirectoryRoomSummary, RoomSnapshot } from '../observer/types';
 import { Overview } from './components/Overview';
 import { PeerDetail, PeerTable } from './components/Devices';
 import { Logs } from './components/Logs';
 import { ConfigGenerator } from './components/ConfigGenerator';
+import { Topology } from './components/Topology';
 import './styles.css';
 
 const TABS = [
   { value: 'overview', label: 'Overview' },
   { value: 'devices', label: 'Devices' },
+  { value: 'topology', label: 'Topology' },
   { value: 'logs', label: 'Logs' },
   { value: 'config', label: 'Config' },
 ];
@@ -35,12 +37,13 @@ export function App() {
         const list = await getRooms();
         let snapshot: RoomSnapshot | null = null;
         if (selected) {
-          const [roomSnapshot, events, traffic] = await Promise.all([
+          const [roomSnapshot, events, traffic, topology] = await Promise.all([
             getRoom(selected),
             getRoomEvents(selected),
             getRoomTraffic(selected),
+            getRoomTopology(selected),
           ]);
-          snapshot = { ...roomSnapshot, recentEvents: events, traffic };
+          snapshot = { ...roomSnapshot, recentEvents: events, traffic, topology };
         }
         setRooms(list);
         if (selected) setRoom(snapshot);
@@ -189,6 +192,8 @@ export function App() {
         </LayerCard.Primary>
       </LayerCard>
     </div>}
+
+    {tab === 'topology' && <Topology topology={room?.topology} />}
 
     {tab === 'logs' && <LayerCard>
       <LayerCard.Secondary>Logs {room ? <Badge variant="outline">{room.roomId}</Badge> : null}</LayerCard.Secondary>

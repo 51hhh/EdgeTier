@@ -1,1 +1,18 @@
-{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend Worker, Durable Object, protocol, and observer API conventions for EasyTier full-member integration."}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Module ownership and route contracts for Worker, RelayRoom, Directory, EasyTier protocol, and observer API changes."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Required API and WebSocket packet error behavior while adding real protocol decode paths."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "EasyTier protocol quality, official proto authority, tests, and build gate requirements."}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Durable Object storage and room summary boundaries for route/topology observer data."}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Safe relay event logging without secrets or raw packet dumps."}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Dashboard conventions for observer payload and component changes."}
+{"file": ".trellis/spec/frontend/directory-structure.md", "reason": "Dashboard/API client organization and shared observer DTO usage."}
+{"file": ".trellis/spec/frontend/component-guidelines.md", "reason": "Kumo component usage and read-only observer UI boundaries."}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "Polling and server-state behavior for dashboard data additions."}
+{"file": ".trellis/spec/frontend/hook-guidelines.md", "reason": "Polling lifecycle guidance for any dashboard data-fetching changes."}
+{"file": ".trellis/spec/frontend/type-safety.md", "reason": "Shared observer DTO and optional field handling for route peer data."}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Frontend build, typecheck, API contract, and test requirements."}
+{"file": ".trellis/spec/guides/index.md", "reason": "Shared thinking guide index required before implementation."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Feature spans protocol, Durable Object state, observer API, and dashboard display."}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Protocol helpers and constants must reuse existing EdgeTier patterns."}
+{"file": "docs/easytier-full-member-prd.md", "reason": "Primary implementation PRD for EasyTier full-member/router-reflector integration."}
+{"file": "docs/easytier-protocol-integration-plan.md", "reason": "Protocol feasibility, staged plan, and reference implementation mapping."}

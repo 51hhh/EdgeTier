@@ -25,6 +25,7 @@ export function Overview({ rooms, room }: OverviewProps) {
     bytes: active.reduce((sum, item) => sum + item.bytes, 0),
   };
   const recent = room ? room.recentEvents.slice(-8).reverse() : [];
+  const topology = room?.topology;
 
   return <div className="stack">
     <section className="grid cards" aria-label="overview metrics">
@@ -37,15 +38,15 @@ export function Overview({ rooms, room }: OverviewProps) {
 
     <section className="grid">
       <LayerCard>
-        <LayerCard.Secondary>Exit / VPN egress <Badge variant="beta">not available</Badge></LayerCard.Secondary>
+        <LayerCard.Secondary>Decoded route peers <Badge variant={topology?.nodes.length ? 'primary' : 'beta'}>{topology?.nodes.length ?? 0}</Badge></LayerCard.Secondary>
         <LayerCard.Primary>
-          <Text as="p" variant="secondary">Exit-node and VPN traffic-egress state is not observable from relay headers alone. It requires official EasyTier proto decode (roadmap v0.1.3) and is intentionally not fabricated here.</Text>
+          <Text as="p" variant="secondary">{topology?.nodes.length ? 'EasyTier route-sync data has been decoded from control-plane RPC.' : 'No route-sync peer records decoded yet.'}</Text>
         </LayerCard.Primary>
       </LayerCard>
       <LayerCard>
-        <LayerCard.Secondary>Topology <Badge variant="beta">not available</Badge></LayerCard.Secondary>
+        <LayerCard.Secondary>Topology edges <Badge variant={topology?.edges.length ? 'primary' : 'beta'}>{topology?.edges.length ?? 0}</Badge></LayerCard.Secondary>
         <LayerCard.Primary>
-          <Text as="p" variant="secondary">Global peer map and P2P/relay edges need route-sync decode (roadmap v0.2). EdgeTier currently observes only per-connection relay activity.</Text>
+          <Text as="p" variant="secondary">{topology?.edges.length ? `Latest topology update ${topology.updatedAt ?? 'observed'}.` : 'No conn-bitmap or peer-center edges decoded yet.'}</Text>
         </LayerCard.Primary>
       </LayerCard>
     </section>

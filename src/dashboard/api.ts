@@ -1,4 +1,4 @@
-import type { DirectoryRoomSummary, RelayEvent, RelayTokenResponse, RoomSnapshot, TrafficSnapshot } from '../observer/types';
+import type { DirectoryRoomSummary, RelayEvent, RelayTokenResponse, RoomSnapshot, TopologySnapshot, TrafficSnapshot } from '../observer/types';
 
 export async function getRooms(): Promise<DirectoryRoomSummary[]> {
   const data = await fetchJson<{ rooms: DirectoryRoomSummary[] }>('/api/rooms');
@@ -16,6 +16,10 @@ export async function getRoomEvents(roomId: string): Promise<RelayEvent[]> {
 
 export async function getRoomTraffic(roomId: string): Promise<TrafficSnapshot> {
   return fetchJson<TrafficSnapshot>(`/api/rooms/${encodeURIComponent(roomId)}/traffic`);
+}
+
+export async function getRoomTopology(roomId: string): Promise<TopologySnapshot> {
+  return fetchJson<TopologySnapshot>(`/api/rooms/${encodeURIComponent(roomId)}/topology`);
 }
 
 export async function createRoomRelayToken(roomId: string): Promise<RelayTokenResponse> {

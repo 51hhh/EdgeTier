@@ -46,7 +46,7 @@ fromPeerId u32 | toPeerId u32 | packetType u8 | flags u8 | forwardCounter u8 | r
   - `RouteConnBitmap`:谁连谁的连接位图 —— **即拓扑图边**。
   - `RouteForeignNetworkInfos`:跨网络信息。
 - **PeerCenterRpc.ReportPeers / GetGlobalPeerMap** → 维护 `globalPeerMap`(每个 peer 的 directPeers + `latency_ms`)—— **即 P2P 延迟图 / P2P-relay 比例**。
-- RPC body 可能 gzip 压缩(`compressionInfo.algo>1`)—— 需 gzip(node:zlib 或 DecompressionStream)。
+- RPC body 可能 Zstd 压缩(`compressionInfo.algo=2`)—— 需 Worker 兼容的 Zstd 解压;不可按 gzip/node:zlib 处理。
 
 > proto 权威定义见 `cf-workers-et-ws/protos/peer_rpc.proto`(已含 google/common 依赖),
 > 应与官方 `research/github/EasyTier` 选定 tag 对齐(EdgeTier 已有 `scripts/check-proto-drift.mjs` 脚手架)。
@@ -94,7 +94,7 @@ WebCrypto + EdgeTier 现有鉴权/观测/面板,而不是从零逆向。EdgeTier
 | `src/easytier/protos/*` | `cf-workers-et-ws/protos/*.proto` + `protos_generated.js` | 对齐官方 tag,proto-drift 校验 |
 | `src/easytier/rpc.ts`(重写) | `.../rpc_handler.js` | TS 化;接 EdgeTier observer 聚合 |
 | `RelayRoom` 路由状态 | `.../peer_manager.js`、`global_state.js` | 并入 DO;复用现有 directory/事件 |
-| 压缩 | `.../compress.js` | node:zlib 或 DecompressionStream |
+| 压缩 | `.../compress.js` | Zstd 解压(Worker 兼容 JS/WASM;当前用 `fzstd`) |
 
 ## 6. 主要风险
 

@@ -64,14 +64,14 @@ export function ConfigGenerator() {
         <div className="form-grid">
           <Input label="Instance name" value={options.instanceName} onChange={(e) => update({ instanceName: e.target.value })} placeholder="home-mesh-client" />
           <Input label="Network name" value={options.networkName} onChange={(e) => update({ networkName: e.target.value })} placeholder="home-mesh" />
-          <SensitiveInput label="Network secret (kept in your browser only)" value={options.networkSecret} onChange={(e) => update({ networkSecret: (e.target as HTMLInputElement).value })} placeholder="paste your network_secret" />
+          <SensitiveInput label="Network secret (not uploaded by this form)" value={options.networkSecret} onChange={(e) => update({ networkSecret: (e.target as HTMLInputElement).value })} placeholder="paste your network_secret" />
           <Input label="Hostname (optional)" value={options.hostname ?? ''} onChange={(e) => update({ hostname: e.target.value })} placeholder="" />
         </div>
         <div className="switch-row">
           <Switch label="DHCP" checked={options.dhcp} onClick={() => update({ dhcp: !options.dhcp })} />
           <Switch label="no_listener (recommended for clients)" checked={options.noListener} onClick={() => update({ noListener: !options.noListener })} />
         </div>
-        <Text as="p" variant="secondary" size="sm">The network secret never leaves your browser; it is not sent to EdgeTier or stored on the server.</Text>
+        <Text as="p" variant="secondary" size="sm">This form does not upload the secret. The deployed Worker must be configured separately with the matching EASYTIER_NETWORK_SECRET secret.</Text>
       </LayerCard.Primary>
     </LayerCard>
 

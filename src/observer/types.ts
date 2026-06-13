@@ -16,6 +16,17 @@ export interface PeerSnapshot {
   peerId?: number;
   networkName?: string;
   networkSecretDigestPrefix?: string;
+  hostname?: string;
+  virtualIpv4?: string;
+  virtualIpv6?: string;
+  udpNatType?: string;
+  tcpNatType?: string;
+  proxyCidrs?: string[];
+  easytierVersion?: string;
+  routeVersion?: number;
+  peerRouteId?: string;
+  networkLength?: number;
+  cost?: number;
   connected: boolean;
   connectedAt: string;
   lastSeen: string;
@@ -44,6 +55,7 @@ export interface RoomSnapshot {
   traffic: TrafficSnapshot;
   peers: PeerSnapshot[];
   recentEvents: RelayEvent[];
+  topology?: TopologySnapshot;
 }
 
 export interface DirectoryRoomSummary {
@@ -60,4 +72,35 @@ export interface RelayTokenResponse {
   token: string;
   expiresAt: string;
   uriPath: string;
+}
+
+export interface RoutePeerSnapshot {
+  peerId: number;
+  hostname?: string;
+  virtualIpv4?: string;
+  virtualIpv6?: string;
+  udpNatType?: string;
+  tcpNatType?: string;
+  proxyCidrs: string[];
+  easytierVersion?: string;
+  routeVersion?: number;
+  peerRouteId?: string;
+  networkLength?: number;
+  cost?: number;
+  sourcePeerId?: number;
+  lastSeen: string;
+}
+
+export interface TopologyEdge {
+  fromPeerId: number;
+  toPeerId: number;
+  source: 'conn_bitmap' | 'peer_center';
+  latencyMs?: number;
+}
+
+export interface TopologySnapshot {
+  roomId: string;
+  nodes: RoutePeerSnapshot[];
+  edges: TopologyEdge[];
+  updatedAt?: string;
 }
