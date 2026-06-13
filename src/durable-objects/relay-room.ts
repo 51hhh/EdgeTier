@@ -533,9 +533,12 @@ export class RelayRoom implements DurableObject {
 
   private buildSyncRouteInfoRequest(session: Session, targetPeerId: number): SyncRouteInfoRequest {
     const peerInfos = this.routePeerInfosForUpdate();
-    const peerIds = [...new Set([EDGE_PEER_ID, targetPeerId, ...this.rawRoutePeerInfos.keys(), ...this.peers.keys()])]
-      .filter((peerId) => peerId > 0)
-      .sort((a, b) => a - b);
+    const peerIds = buildRouteUpdatePeerIds(
+      targetPeerId,
+      this.rawRoutePeerInfos.keys(),
+      this.peers.keys(),
+      this.peerCenterLastSeen().keys(),
+    );
     return {
       myPeerId: EDGE_PEER_ID,
       mySessionId: session.serverSessionId,
@@ -1385,6 +1388,17 @@ export function buildRouteConnBitmapForUpdate(peerIds: number[], version: number
   for (const edge of observedEdges) setBit(edge.fromPeerId, edge.toPeerId);
 
   return { peerIds: orderedPeerIds.map((peerId) => ({ peerId, version })), bitmap };
+}
+
+export function buildRouteUpdatePeerIds(
+  targetPeerId: number,
+  routePeerIds: Iterable<number>,
+  livePeerIds: Iterable<number>,
+  peerCenterPeerIds: Iterable<number>,
+): number[] {
+  return [...new Set([EDGE_PEER_ID, targetPeerId, ...routePeerIds, ...livePeerIds, ...peerCenterPeerIds])]
+    .filter((peerId) => Number.isInteger(peerId) && peerId > 0)
+    .sort((a, b) => a - b);
 }
 
 function edgesFromConnBitmap(conn: RouteConnBitmap): TopologyEdge[] {

@@ -221,6 +221,7 @@ RelayRoom.handleRpc(session, header, payload, frame): Promise<boolean>
 | `RpcResp` descriptor is `OspfRouteRpc` | Do not call `decodeSyncRouteInfoRequest` on the response wrapper |
 | EdgeTier pushes `OspfRouteRpc.SyncRouteInfo` as a server-initiated `RpcReq` | Wrap it in `RpcRequest` + `RpcPacket`, encrypt when the session has keys, and throttle pushes per session |
 | EdgeTier builds a server-pushed `RouteConnBitmap` | Include observed conn-bitmap edges plus EdgeTier-to-live-peer edges; do not synthesize full-mesh connectivity across route-only peers |
+| EdgeTier knows peer ids only through PeerCenter | Include those peer ids in the pushed route bitmap peer-id set so observed topology is not truncated to direct route peers |
 | A session is already bound to a client peer id | Do not rebind it from later packet headers; ignore `header.fromPeerId === EDGE_PEER_ID` to avoid showing the remote session as EdgeTier itself |
 | `RpcPacket.compression_info.algo === 2` | Zstd-decompress `RpcPacket.body` with a Worker-compatible implementation before decoding `RpcRequest`; do not treat EasyTier RPC compression as gzip |
 | EdgeTier sends active `PeerCenterRpc.GetGlobalPeerMap` | Use `methodIndex = 2`; `methodIndex = 1` is `ReportPeers` in official 2.6.4 |
@@ -233,6 +234,7 @@ RelayRoom.handleRpc(session, header, payload, frame): Promise<boolean>
 - Good: server-initiated route sync uses `methodIndex = 1`, and server-initiated PeerCenter global-map requests use `methodIndex = 2`.
 - Good: route update pushes are rate-limited so frequent empty client route-sync requests do not create control-plane spam.
 - Good: route update bitmaps advertise EdgeTier as connected to live WebSocket peers and preserve observed conn-bitmap edges without inventing direct links between route-only peers.
+- Good: route update bitmap peer-id lists include PeerCenter-only peer ids, even when their hostname/IP RoutePeerInfo has not been decoded yet.
 - Good: session peer identity is established from the handshake / first non-Edge packet and later control packets cannot rebind it to `EDGE_PEER_ID`.
 - Good: a Zstd-compressed `RpcPacket.body` is decompressed with a Worker-compatible implementation before service dispatch.
 - Base: an `RpcResp` for `OspfRouteRpc` is observed but produces no `syncRouteInfo` object.

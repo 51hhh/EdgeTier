@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { EDGE_PEER_ID } from '../easytier/constants';
-import { buildRouteConnBitmapForUpdate, buildTopologySummary, framePeerBindingCandidate, resolveDefaultRoomConfig, resolveNetworkConfig, resolveOutboundTcpPeers, toArrayBuffer } from './relay-room';
+import { buildRouteConnBitmapForUpdate, buildRouteUpdatePeerIds, buildTopologySummary, framePeerBindingCandidate, resolveDefaultRoomConfig, resolveNetworkConfig, resolveOutboundTcpPeers, toArrayBuffer } from './relay-room';
 
 function bitmapHas(bitmap: Uint8Array, size: number, row: number, col: number): boolean {
   const bitIndex = row * size + col;
@@ -149,6 +149,17 @@ describe('buildRouteConnBitmapForUpdate', () => {
     expect(bitmapHas(bitmap.bitmap, peerIds.length, peer42Index, peer100Index)).toBe(true);
     expect(bitmapHas(bitmap.bitmap, peerIds.length, edgeIndex, peer100Index)).toBe(false);
     expect(bitmapHas(bitmap.bitmap, peerIds.length, peer100Index, peer42Index)).toBe(false);
+  });
+});
+
+describe('buildRouteUpdatePeerIds', () => {
+  it('includes live, route, and PeerCenter-only peers in route pushes', () => {
+    expect(buildRouteUpdatePeerIds(
+      42,
+      [42, 100, 0],
+      [42],
+      [200, 300, 200, -1],
+    )).toEqual([42, 100, 200, 300, EDGE_PEER_ID]);
   });
 });
 
