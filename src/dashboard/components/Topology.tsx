@@ -149,13 +149,22 @@ function ConnectionGraph({ topology, nodeByPeerId, t }: { topology?: TopologySna
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState({ x: 0, y: 0 });
 
-  const handleWheel = (e: React.WheelEvent<SVGSVGElement>) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const delta = e.deltaY > 0 ? 0.9 : 1.1;
-    const newScale = Math.max(0.5, Math.min(3, transform.scale * delta));
-    setTransform(prev => ({ ...prev, scale: newScale }));
-  };
+  // Use native DOM event for wheel to bypass React's passive listener
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg) return;
+
+    const handleWheelNative = (e: WheelEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const delta = e.deltaY > 0 ? 0.9 : 1.1;
+      const newScale = Math.max(0.5, Math.min(3, transform.scale * delta));
+      setTransform(prev => ({ ...prev, scale: newScale }));
+    };
+
+    svg.addEventListener('wheel', handleWheelNative, { passive: false });
+    return () => svg.removeEventListener('wheel', handleWheelNative);
+  }, [transform.scale]);
 
   const handleMouseDown = (e: React.MouseEvent<SVGSVGElement>) => {
     if (e.button === 0) {
@@ -203,7 +212,6 @@ function ConnectionGraph({ topology, nodeByPeerId, t }: { topology?: TopologySna
             ref={svgRef}
             viewBox={`0 0 ${GRAPH_WIDTH} ${GRAPH_HEIGHT}`}
             style={{ cursor: isPanning ? 'grabbing' : 'grab' }}
-            onWheel={handleWheel}
             onMouseDown={handleMouseDown}
             onMouseMove={handleMouseMove}
             onMouseUp={handleMouseUp}
