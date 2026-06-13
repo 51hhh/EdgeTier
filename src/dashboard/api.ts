@@ -1,4 +1,4 @@
-import type { DirectoryRoomSummary, RelayEvent, RelayTokenResponse, RoomSnapshot, TopologySnapshot, TrafficSnapshot } from '../observer/types';
+import type { DirectoryRoomSummary, OutboundTcpStatus, RelayEvent, RelayTokenResponse, RoomSnapshot, TopologySnapshot, TrafficSnapshot } from '../observer/types';
 
 export async function getRooms(): Promise<DirectoryRoomSummary[]> {
   const data = await fetchJson<{ rooms: DirectoryRoomSummary[] }>('/api/rooms');
@@ -24,6 +24,14 @@ export async function getRoomTopology(roomId: string): Promise<TopologySnapshot>
 
 export async function createRoomRelayToken(roomId: string): Promise<RelayTokenResponse> {
   return fetchJson<RelayTokenResponse>(`/api/rooms/${encodeURIComponent(roomId)}/token`, { method: 'POST' });
+}
+
+export async function getOutboundTcpStatus(roomId: string): Promise<OutboundTcpStatus> {
+  return fetchJson<OutboundTcpStatus>(`/api/rooms/${encodeURIComponent(roomId)}/outbound-tcp`);
+}
+
+export async function startOutboundTcp(roomId: string): Promise<OutboundTcpStatus> {
+  return fetchJson<OutboundTcpStatus>(`/api/rooms/${encodeURIComponent(roomId)}/outbound-tcp`, { method: 'POST' });
 }
 
 export async function seedRoom(roomId: string, count: number): Promise<void> {

@@ -9,8 +9,10 @@
 实施状态补充(2026-06-13):Phase A/B 已在 EdgeTier 实现并用真机向量及部署版 `8e2be8b0-7244-47b5-852f-dbd0b4ce36a3`
 验证核心握手、解密、SyncRouteInfo 解码、真实 `home-mesh` RoutePeerInfo/conn bitmap/PeerCenter topology;
 Phase C/D 的 Worker-feasible 部分已接入 route push/broadcast、PeerCenter 响应/聚合、DO storage/alarms cleanup、
-topology summary DTO 与面板。剩余工作是压缩 route 表真机向量、断线 cleanup/长测、DO 重启/休眠证据、per-room secret 部署验证;
-出站 TCP `connect()` 暂未实现,因官方 TCP 帧/lifecycle 尚未形成可安全测试闭环。
+topology summary DTO 与面板。出站 TCP `connect()` 已实现 Worker 侧主动拨号:官方 TCP tunnel 帧确认为
+`u32le length + EasyTier peer-manager frame`,`RelayRoom` 可主动拨 `tcp://` 公共节点并复用现有握手/解密/RPC 观测路径。
+部署版 `6a15c4e3-3582-472d-9019-73b8147ed2ed` 已完成 `home-mesh` outbound TCP live evidence。
+剩余工作是压缩 route 表真机向量、断线 cleanup/长测、DO 重启/休眠证据、per-room secret 部署验证。
 
 ## 1. 结论:可行,且有现成先例
 
@@ -115,4 +117,4 @@ WebCrypto + EdgeTier 现有鉴权/观测/面板,而不是从零逆向。EdgeTier
 1. 用 ≥2 个真实 easytier-core 2.6.4 节点补压缩 route 表真机向量、route push/broadcast 长测、断线 cleanup。
 2. 验证 DO 重启/休眠后 route/PeerCenter 观测状态可恢复或可重建;如需要恢复 socket attachment,再评估 WebSocket Hibernation API 迁移。
 3. 部署 `EASYTIER_NETWORKS`/`EASYTIER_NETWORK_SECRETS` Worker secrets,验证多 room 多 network 隔离。
-4. W5 outbound TCP 保持 future work,仅在 TCP 帧格式/lifecycle 与 Worker `connect()` 测试闭环清楚后实现。
+4. 部署验证 W5 outbound TCP:`EASYTIER_PUBLIC_PEER_TCP` 或 `EASYTIER_OUTBOUND_TCP_PEERS` 配置 `tcp://` 公共 peer,访问房间 API/面板触发主动拨号,用 `/api/rooms/:id/outbound-tcp` 与拓扑页核对入网状态。

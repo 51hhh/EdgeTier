@@ -10,4 +10,6 @@ export interface Env {
   EASYTIER_NETWORK_SECRET?: string;
   EASYTIER_NETWORK_SECRETS?: string;
   EASYTIER_NETWORKS?: string;
+  EASYTIER_PUBLIC_PEER_TCP?: string;
+  EASYTIER_OUTBOUND_TCP_PEERS?: string;
 }

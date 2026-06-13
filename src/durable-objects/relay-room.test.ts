@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { EDGE_PEER_ID } from '../easytier/constants';
-import { buildRouteConnBitmapForUpdate, buildTopologySummary, framePeerBindingCandidate, resolveNetworkConfig, toArrayBuffer } from './relay-room';
+import { buildRouteConnBitmapForUpdate, buildTopologySummary, framePeerBindingCandidate, resolveNetworkConfig, resolveOutboundTcpPeers, toArrayBuffer } from './relay-room';
 
 function bitmapHas(bitmap: Uint8Array, size: number, row: number, col: number): boolean {
   const bitIndex = row * size + col;
@@ -70,6 +70,36 @@ describe('resolveNetworkConfig', () => {
       EASYTIER_NETWORK_SECRET: 'global-secret',
       EASYTIER_NETWORK_SECRETS: JSON.stringify({ 'global-mesh': 'mapped-global-secret' }),
     }, 'room-b')).toEqual({ networkName: 'global-mesh', secret: 'mapped-global-secret' });
+  });
+});
+
+describe('resolveOutboundTcpPeers', () => {
+  it('uses global public TCP peer fallback', () => {
+    expect(resolveOutboundTcpPeers({ EASYTIER_PUBLIC_PEER_TCP: 'tcp://example.com:11010' }, 'home-mesh')).toEqual([
+      { uri: 'tcp://example.com:11010', hostname: 'example.com', port: 11010 },
+    ]);
+  });
+
+  it('supports per-room outbound TCP peer maps', () => {
+    expect(resolveOutboundTcpPeers({
+      EASYTIER_OUTBOUND_TCP_PEERS: JSON.stringify({
+        home: ['tcp://home.example:11010', { uri: 'tcp://backup.example:11011' }],
+        lab: { peers: 'tcp://lab.example:11010' },
+      }),
+      EASYTIER_PUBLIC_PEER_TCP: 'tcp://global.example:11010',
+    }, 'home')).toEqual([
+      { uri: 'tcp://home.example:11010', hostname: 'home.example', port: 11010 },
+      { uri: 'tcp://backup.example:11011', hostname: 'backup.example', port: 11011 },
+      { uri: 'tcp://global.example:11010', hostname: 'global.example', port: 11010 },
+    ]);
+  });
+
+  it('ignores invalid and duplicate outbound TCP peers', () => {
+    expect(resolveOutboundTcpPeers({
+      EASYTIER_OUTBOUND_TCP_PEERS: 'tcp://example.com:11010,udp://example.com:11010,tcp://example.com:11010',
+    }, 'home')).toEqual([
+      { uri: 'tcp://example.com:11010', hostname: 'example.com', port: 11010 },
+    ]);
   });
 });
 

@@ -105,3 +105,14 @@ export function buildHandshakeResponse(clientReq: HandshakeRequest, networkName:
     networkSecretDigest: generateDigestFromStr(networkName, networkSecret, 32),
   };
 }
+
+export function buildHandshakeRequest(networkName: string, networkSecret: string): HandshakeRequest {
+  return {
+    magic: EASYTIER_MAGIC,
+    myPeerId: EDGE_PEER_ID,
+    version: EASYTIER_VERSION,
+    features: [],
+    networkName,
+    networkSecretDigest: generateDigestFromStr(networkName, networkSecret, 32),
+  };
+}

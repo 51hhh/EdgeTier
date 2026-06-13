@@ -55,7 +55,9 @@
 - observer API(`src/observer/api.ts`):`/api/health` `/api/rooms` `/api/rooms/:id[/peers|events|traffic|topology|token|test-seed]`。
 - 面板:Devices/Overview/Topology 显示真实 RoutePeerInfo、conn bitmap、PeerCenter latency summary;seed 数据仅作显式测试开关。
 
-**剩余局限**:Worker 仍不能主动拨 UDP/TUN/L3;完整 RoutePeerInfo 依赖真实 EasyTier 节点拨入 WSS 并向 Worker 泛洪路由。尚缺压缩 route 表真机向量、断线 cleanup 长测、DO 重启/休眠、per-room secret 隔离验证。
+**剩余局限**:Worker 仍不能主动拨 UDP、不能 TUN/L3、不能做 EasyTier TCP/UDP 打洞;但已可用 `cloudflare:sockets`
+主动拨普通 `tcp://` 公共 peer 并作为控制面成员入网;部署版 `6a15c4e3-3582-472d-9019-73b8147ed2ed`
+已完成 `home-mesh` live evidence。尚缺压缩 route 表真机向量、断线 cleanup 长测、DO 重启/休眠、per-room secret 隔离验证。
 
 ### 1.3 本轮部署验证补充(2026-06-13)
 
@@ -209,14 +211,16 @@ proto/easytier/    # proto 漂移校验目标(scripts/check-proto-drift.mjs)
 - **真机向量已固化**:`handshake.test.ts`(真实 HandshakeRequest 字节)、`realtraffic.test.ts`(真实加密 RpcReq)。
   Phase B 解码应复用这些向量做离线回归。
 - **凭据/密钥**:均在 gitignored `.env`(`EASYTIER_NETWORK_SECRET` 等)与 CF Worker secret;**不得提交**。
+- **outbound TCP 验证**:Worker secret/vars 配置 `EASYTIER_PUBLIC_PEER_TCP` 或 `EASYTIER_OUTBOUND_TCP_PEERS`;
+  访问 `/api/rooms/<room>` 或面板会触发主动拨号,`GET /api/rooms/<room>/outbound-tcp` 查看 configured/connecting/connected/handshake 状态。
 - 每次改动跑全门禁;后端协议改动按 Trellis 走 `trellis-implement` → `trellis-check`。
 
 ---
 
 ## 6. 约束 / 非目标 / 安全
 
-- **Cloudflare Workers 硬约束**:无 TUN、不能跑 easytier-core、不能主动拨 UDP/TCP 打洞;EdgeTier 只做
-  WSS shared node / 路由反射器 / 观测 / 网关,**不承担三层数据面**。
+- **Cloudflare Workers 硬约束**:无 TUN、不能跑 easytier-core、不能主动拨 UDP 或做 TCP/UDP 打洞;EdgeTier 可做
+  WSS/TCP shared node / 路由反射器 / 观测 / 网关,**不承担三层数据面**。
 - 不在 Worker 内做完整 VPN 内核;真实 VPN 由真节点承担。
 - network_secret 等仅作 Worker secret;dashboard/API **绝不**明文回显 secret/完整 digest(可显 digest 前缀)。
 - 仅服务所有者自有网络;这是为自有网络实现兼容 shared node。

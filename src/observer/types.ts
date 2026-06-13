@@ -13,6 +13,7 @@ export interface RelayEvent {
 export interface PeerSnapshot {
   sessionId: string;
   roomId: string;
+  transportKind?: 'websocket' | 'tcp-outbound';
   peerId?: number;
   networkName?: string;
   networkSecretDigestPrefix?: string;
@@ -72,6 +73,24 @@ export interface RelayTokenResponse {
   token: string;
   expiresAt: string;
   uriPath: string;
+}
+
+export interface OutboundTcpPeerStatus {
+  uri: string;
+  configured: boolean;
+  connecting: boolean;
+  connected: boolean;
+  sessionId?: string;
+  peerId?: number;
+  handshakeAccepted: boolean;
+  lastSeen?: string;
+  rxBytes: number;
+  txBytes: number;
+}
+
+export interface OutboundTcpStatus {
+  roomId: string;
+  peers: OutboundTcpPeerStatus[];
 }
 
 export interface RoutePeerSnapshot {

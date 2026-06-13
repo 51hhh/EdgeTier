@@ -1,6 +1,6 @@
 import { EASYTIER_HEADER_SIZE, EASYTIER_MAGIC, EASYTIER_VERSION, EDGE_PEER_ID, EasyTierPacketType, MAX_FRAME_SIZE, MAX_INVALID_PACKETS_PER_SESSION, MAX_PEERS_PER_ROOM, RECENT_EVENTS_LIMIT } from '../easytier/constants';
 import { AEAD_TAIL_SIZE, decryptAesGcm, deriveKeys, encryptAesGcm, type DerivedKeys } from '../easytier/crypto';
-import { buildHandshakeResponse, decodeHandshake, encodeHandshake } from '../easytier/handshake';
+import { buildHandshakeRequest, buildHandshakeResponse, decodeHandshake, encodeHandshake } from '../easytier/handshake';
 import { createEasyTierFrame, parseEasyTierHeader, payloadLengthMatches, splitEasyTierFrames, type EasyTierPacketHeader } from '../easytier/packet';
 import { bytesEqual, hex } from '../easytier/protobuf';
 import {
@@ -24,13 +24,20 @@ import {
   type RoutePeerInfo,
   type SyncRouteInfoRequest,
 } from '../easytier/rpc';
+import { encodeTcpTunnelFrame, parseTcpPeerUri, TcpTunnelFrameDecoder, type TcpPeerAddress } from '../easytier/tcp-frame';
 import type { PeerSnapshot, RelayEvent, RoomSnapshot, RoutePeerSnapshot, TopologyEdge, TopologySnapshot, TopologySummary, TrafficSnapshot } from '../observer/types';
 import type { Env } from '../worker/env';
 
+type SessionTransportKind = 'websocket' | 'tcp-outbound';
+
 type Session = PeerSnapshot & {
-  ws: WebSocket;
+  transportKind: SessionTransportKind;
+  sendRawFrame: (frame: Uint8Array) => void | Promise<void>;
+  closeTransport: (code?: number, reason?: string) => void | Promise<void>;
+  isTransportOpen: () => boolean;
   invalidPackets: number;
   messageQueue: Promise<void>;
+  writeQueue: Promise<void>;
   keys?: DerivedKeys;
   serverSessionId?: bigint;
   handshakeAccepted?: boolean;
@@ -38,6 +45,8 @@ type Session = PeerSnapshot & {
   lastPingSent: number;
   lastPongReceived: number;
   ospfDescriptor?: DecodedEasyTierRpc['descriptor'];
+  outboundPeerUri?: string;
+  outboundHandshakeSent?: boolean;
 };
 
 export interface NetworkConfig {
@@ -87,6 +96,7 @@ export class RelayRoom implements DurableObject {
   private directorySyncQueued = false;
   private lastControlStatePersist = 0;
   private controlStatePersistQueued = false;
+  private outboundTcpConnecting = new Set<string>();
 
   constructor(private readonly state: DurableObjectState, private readonly env: Env) {
     this.state.blockConcurrencyWhile(async () => {
@@ -99,6 +109,10 @@ export class RelayRoom implements DurableObject {
     const url = new URL(request.url);
     const roomId = url.searchParams.get('room') ?? 'default';
     if (url.pathname === '/connect') return this.acceptWebSocket(request, roomId);
+    this.state.waitUntil(this.ensureConfiguredOutboundTcp(roomId).catch(() => {
+      this.addEvent(roomId, 'decode_error', 'outbound tcp startup failed');
+    }));
+    if (url.pathname === '/outbound-tcp') return this.outboundTcp(request, roomId);
     if (url.pathname === '/test-seed') return this.seed(request, roomId);
     if (url.pathname === '/peers') return Response.json({ peers: this.snapshot(roomId).peers });
     if (url.pathname === '/events') return Response.json({ events: this.events });
@@ -111,6 +125,7 @@ export class RelayRoom implements DurableObject {
     const roomId = this.currentRoomId();
     const pruned = this.pruneStaleRouteState();
     this.runHeartbeatMaintenance();
+    if (roomId) await this.ensureConfiguredOutboundTcp(roomId);
     if (pruned) {
       await this.persistControlState();
       if (roomId) await this.syncDirectory(roomId);
@@ -141,8 +156,15 @@ export class RelayRoom implements DurableObject {
       rxPackets: 0,
       txPackets: 0,
       invalidPackets: 0,
-      ws: server,
+      transportKind: 'websocket',
+      sendRawFrame: (frame) => {
+        if (server.readyState !== WS_OPEN) throw new Error('websocket is not open');
+        server.send(frame);
+      },
+      closeTransport: (code, reason) => server.close(code, reason),
+      isTransportOpen: () => server.readyState === WS_OPEN,
       messageQueue: Promise.resolve(),
+      writeQueue: Promise.resolve(),
       lastPingSent: 0,
       lastPongReceived: nowMs,
     };
@@ -212,15 +234,20 @@ export class RelayRoom implements DurableObject {
       return;
     }
 
+    if (session.transportKind === 'tcp-outbound' && session.outboundHandshakeSent && !session.handshakeAccepted) {
+      await this.handleOutboundHandshake(session, header, clientReq);
+      return;
+    }
+
     const clientPeerId = clientReq.myPeerId || header.fromPeerId;
     if (!clientPeerId) {
       this.addEvent(session.roomId, 'decode_error', 'handshake missing peer id', session);
-      session.ws.close(1008, 'missing peer id');
+      this.closeSessionTransport(session, 1008, 'missing peer id');
       return;
     }
     if (clientPeerId === EDGE_PEER_ID) {
       this.addEvent(session.roomId, 'decode_error', 'handshake peer id conflicts with EdgeTier peer id', session);
-      session.ws.close(1008, 'peer id conflict');
+      this.closeSessionTransport(session, 1008, 'peer id conflict');
       return;
     }
     this.bindPeer(session, clientPeerId);
@@ -229,14 +256,14 @@ export class RelayRoom implements DurableObject {
 
     if ((clientReq.magic >>> 0) !== EASYTIER_MAGIC || clientReq.version !== EASYTIER_VERSION) {
       this.addEvent(session.roomId, 'decode_error', 'handshake protocol mismatch', session);
-      session.ws.close(1008, 'protocol mismatch');
+      this.closeSessionTransport(session, 1008, 'protocol mismatch');
       return;
     }
 
     const networkConfig = this.networkConfigFor(session.roomId);
     if (clientReq.networkName !== networkConfig.networkName) {
       this.addEvent(session.roomId, 'decode_error', `handshake network mismatch for ${clientReq.networkName || 'unknown'}`, session);
-      session.ws.close(1008, 'network mismatch');
+      this.closeSessionTransport(session, 1008, 'network mismatch');
       return;
     }
     if (!networkConfig.secret) {
@@ -247,7 +274,7 @@ export class RelayRoom implements DurableObject {
     const response = buildHandshakeResponse(clientReq, networkConfig.networkName, networkConfig.secret);
     if (!bytesEqual(clientReq.networkSecretDigest, response.networkSecretDigest)) {
       this.addEvent(session.roomId, 'decode_error', 'handshake secret digest mismatch', session);
-      session.ws.close(1008, 'network secret mismatch');
+      this.closeSessionTransport(session, 1008, 'network secret mismatch');
       return;
     }
 
@@ -259,6 +286,56 @@ export class RelayRoom implements DurableObject {
     this.queueDirectorySync(session.roomId, true);
     this.state.waitUntil(this.bootstrapControlPlane(session, clientReq.myPeerId).catch(() => {
       this.addEvent(session.roomId, 'decode_error', 'control-plane bootstrap failed', session);
+    }));
+  }
+
+  private async handleOutboundHandshake(session: Session, header: EasyTierPacketHeader, response: ReturnType<typeof decodeHandshake>): Promise<void> {
+    const remotePeerId = response.myPeerId || header.fromPeerId;
+    if (!remotePeerId) {
+      this.addEvent(session.roomId, 'decode_error', 'outbound handshake missing peer id', session);
+      this.closeSessionTransport(session, 1008, 'missing peer id');
+      return;
+    }
+    if (remotePeerId === EDGE_PEER_ID) {
+      this.addEvent(session.roomId, 'decode_error', 'outbound handshake peer id conflicts with EdgeTier peer id', session);
+      this.closeSessionTransport(session, 1008, 'peer id conflict');
+      return;
+    }
+    session.networkName = response.networkName || session.networkName;
+    session.networkSecretDigestPrefix = hex(response.networkSecretDigest).slice(0, 12) || undefined;
+
+    if ((response.magic >>> 0) !== EASYTIER_MAGIC || response.version !== EASYTIER_VERSION) {
+      this.addEvent(session.roomId, 'decode_error', 'outbound handshake protocol mismatch', session);
+      this.closeSessionTransport(session, 1008, 'protocol mismatch');
+      return;
+    }
+
+    const networkConfig = this.networkConfigFor(session.roomId);
+    if (response.networkName !== networkConfig.networkName) {
+      this.addEvent(session.roomId, 'decode_error', `outbound handshake network mismatch for ${response.networkName || 'unknown'}`, session);
+      this.closeSessionTransport(session, 1008, 'network mismatch');
+      return;
+    }
+    if (!networkConfig.secret) {
+      this.addEvent(session.roomId, 'handshake_seen', 'outbound handshake observed; network secret is not configured', session);
+      return;
+    }
+
+    const expected = buildHandshakeRequest(networkConfig.networkName, networkConfig.secret);
+    if (!bytesEqual(response.networkSecretDigest, expected.networkSecretDigest)) {
+      this.addEvent(session.roomId, 'decode_error', 'outbound handshake secret digest mismatch', session);
+      this.closeSessionTransport(session, 1008, 'network secret mismatch');
+      return;
+    }
+
+    this.bindPeer(session, remotePeerId);
+    session.keys = deriveKeys(networkConfig.secret);
+    session.handshakeAccepted = true;
+    session.serverSessionId = session.serverSessionId ?? randomU64();
+    this.addEvent(session.roomId, 'handshake_seen', 'outbound tcp handshake accepted', session);
+    this.queueDirectorySync(session.roomId, true);
+    this.state.waitUntil(this.bootstrapControlPlane(session, remotePeerId).catch(() => {
+      this.addEvent(session.roomId, 'decode_error', 'outbound control-plane bootstrap failed', session);
     }));
   }
 
@@ -336,11 +413,7 @@ export class RelayRoom implements DurableObject {
       this.queueDirectorySync(session.roomId);
       return;
     }
-    target.ws.send(frame);
-    target.txBytes += frame.byteLength;
-    target.txPackets += 1;
-    this.traffic.txBytes += frame.byteLength;
-    this.traffic.txPackets += 1;
+    this.emitFrame(target, frame);
     this.traffic.forwardedPackets += 1;
     this.addEvent(session.roomId, 'packet_forwarded', `packet type ${header.packetType} forwarded to peer ${header.toPeerId}`, session);
     this.queueDirectorySync(session.roomId);
@@ -385,11 +458,26 @@ export class RelayRoom implements DurableObject {
   private sendFrame(session: Session, toPeerId: number, packetType: EasyTierPacketType, payload: Uint8Array, flags = 0, declaredLen = payload.length): void {
     if (!toPeerId) return;
     const frame = createEasyTierFrame({ fromPeerId: EDGE_PEER_ID, toPeerId, packetType, flags, forwardCounter: 1, reserved: 0, len: declaredLen }, payload);
-    session.ws.send(frame);
-    session.txBytes += frame.byteLength;
-    session.txPackets += 1;
-    this.traffic.txBytes += frame.byteLength;
-    this.traffic.txPackets += 1;
+    this.emitFrame(session, frame);
+  }
+
+  private emitFrame(session: Session, frame: Uint8Array | ArrayBuffer): void {
+    const bytes = frame instanceof Uint8Array ? frame : new Uint8Array(frame);
+    session.writeQueue = session.writeQueue.then(async () => {
+      await session.sendRawFrame(bytes);
+      session.txBytes += bytes.byteLength;
+      session.txPackets += 1;
+      this.traffic.txBytes += bytes.byteLength;
+      this.traffic.txPackets += 1;
+    }).catch((error) => {
+      if (error instanceof RangeError && error.message.includes('too large')) {
+        this.addEvent(session.roomId, 'limit_exceeded', `${session.transportKind} send skipped; frame exceeds transport limit`, session);
+        return;
+      }
+      this.addEvent(session.roomId, 'decode_error', `${session.transportKind} send failed`, session);
+      this.disconnect(session);
+    });
+    this.state.waitUntil(session.writeQueue);
   }
 
   private applySyncRouteInfo(session: Session, req: SyncRouteInfoRequest): boolean {
@@ -537,7 +625,7 @@ export class RelayRoom implements DurableObject {
     session.invalidPackets += 1;
     this.traffic.invalidPackets += 1;
     this.addEvent(session.roomId, session.invalidPackets > MAX_INVALID_PACKETS_PER_SESSION ? 'limit_exceeded' : 'decode_error', message, session);
-    if (session.invalidPackets > MAX_INVALID_PACKETS_PER_SESSION) session.ws.close(1008, 'too many invalid packets');
+    if (session.invalidPackets > MAX_INVALID_PACKETS_PER_SESSION) this.closeSessionTransport(session, 1008, 'too many invalid packets');
     this.queueDirectorySync(session.roomId);
   }
 
@@ -550,7 +638,7 @@ export class RelayRoom implements DurableObject {
     const routeStateChanged = peerId ? this.removeRouteStateForSource(peerId) : false;
     const topologyChanged = peerCenterChanged || routeStateChanged;
     session.connected = false;
-    this.addEvent(session.roomId, 'disconnected', 'websocket disconnected', session);
+    this.addEvent(session.roomId, 'disconnected', `${session.transportKind} disconnected`, session);
     if (topologyChanged) {
       this.routeVersion += 1;
       this.topologyUpdatedAt = new Date().toISOString();
@@ -560,12 +648,175 @@ export class RelayRoom implements DurableObject {
       }));
     }
     this.queueDirectorySync(session.roomId, true);
+    if (session.transportKind === 'tcp-outbound') this.queueOutboundTcpReconnect(session.roomId);
     this.state.waitUntil(this.ensureMaintenanceAlarm());
   }
 
   private addEvent(roomId: string, type: RelayEvent['type'], message: string, session?: Session): void {
     this.events.push({ id: crypto.randomUUID(), timestamp: new Date().toISOString(), roomId, type, sessionId: session?.sessionId, peerId: session?.peerId, message });
     if (this.events.length > RECENT_EVENTS_LIMIT) this.events.splice(0, this.events.length - RECENT_EVENTS_LIMIT);
+  }
+
+  private async outboundTcp(request: Request, roomId: string): Promise<Response> {
+    if (request.method === 'GET') return Response.json(this.outboundTcpStatus(roomId));
+    if (request.method !== 'POST') return Response.json({ error: 'method not allowed' }, { status: 405 });
+    await this.ensureConfiguredOutboundTcp(roomId);
+    return Response.json(this.outboundTcpStatus(roomId));
+  }
+
+  private outboundTcpStatus(roomId: string) {
+    const configured = resolveOutboundTcpPeers(this.env, roomId);
+    return {
+      roomId,
+      peers: configured.map((peer) => {
+        const session = this.outboundTcpSession(peer.uri);
+        return {
+          uri: peer.uri,
+          configured: true,
+          connecting: this.outboundTcpConnecting.has(outboundTcpKey(roomId, peer.uri)),
+          connected: Boolean(session?.connected),
+          sessionId: session?.sessionId,
+          peerId: session?.peerId,
+          handshakeAccepted: Boolean(session?.handshakeAccepted),
+          lastSeen: session?.lastSeen,
+          rxBytes: session?.rxBytes ?? 0,
+          txBytes: session?.txBytes ?? 0,
+        };
+      }),
+    };
+  }
+
+  private async ensureConfiguredOutboundTcp(roomId: string): Promise<void> {
+    const peers = resolveOutboundTcpPeers(this.env, roomId);
+    if (peers.length === 0) return;
+    await Promise.all(peers.map((peer) => this.connectOutboundTcp(roomId, peer)));
+    await this.ensureMaintenanceAlarm();
+  }
+
+  private async connectOutboundTcp(roomId: string, peer: TcpPeerAddress): Promise<void> {
+    const key = outboundTcpKey(roomId, peer.uri);
+    const existing = this.outboundTcpSession(peer.uri);
+    if (existing?.connected || this.outboundTcpConnecting.has(key)) return;
+
+    const networkConfig = this.networkConfigFor(roomId);
+    if (!networkConfig.secret) {
+      this.addEvent(roomId, 'decode_error', 'outbound tcp skipped; network secret is not configured');
+      return;
+    }
+
+    this.outboundTcpConnecting.add(key);
+    this.addEvent(roomId, 'connected', 'outbound tcp connecting to configured peer');
+    try {
+      const { connect } = await import('cloudflare:sockets');
+      const socket = connect({ hostname: peer.hostname, port: peer.port }, { allowHalfOpen: false });
+      await socket.opened;
+      const writer = socket.writable.getWriter() as WritableStreamDefaultWriter<Uint8Array>;
+      const reader = socket.readable.getReader() as ReadableStreamDefaultReader<Uint8Array>;
+      const session = this.createOutboundTcpSession(roomId, peer.uri, socket, writer);
+      this.sessions.set(session.sessionId, session);
+      this.addEvent(roomId, 'connected', 'outbound tcp connected to configured peer', session);
+      this.queueDirectorySync(roomId, true);
+      this.state.waitUntil(this.readOutboundTcp(session, reader).catch(() => {
+        this.addEvent(roomId, 'disconnected', 'outbound tcp read loop failed', session);
+        this.disconnect(session);
+      }));
+      this.state.waitUntil(socket.closed.catch(() => undefined).then(() => this.disconnect(session)));
+      this.sendOutboundHandshake(session, networkConfig.networkName, networkConfig.secret);
+    } catch {
+      this.addEvent(roomId, 'disconnected', 'outbound tcp connection failed');
+    } finally {
+      this.outboundTcpConnecting.delete(key);
+    }
+  }
+
+  private createOutboundTcpSession(roomId: string, peerUri: string, socket: Socket, writer: WritableStreamDefaultWriter<Uint8Array>): Session {
+    const now = new Date().toISOString();
+    const nowMs = Date.now();
+    let open = true;
+    socket.closed.finally(() => { open = false; }).catch(() => undefined);
+    return {
+      sessionId: crypto.randomUUID(),
+      roomId,
+      connected: true,
+      connectedAt: now,
+      lastSeen: now,
+      rxBytes: 0,
+      txBytes: 0,
+      rxPackets: 0,
+      txPackets: 0,
+      transportKind: 'tcp-outbound',
+      sendRawFrame: (frame) => writer.write(encodeTcpTunnelFrame(frame)),
+      closeTransport: async () => {
+        open = false;
+        await writer.close().catch(() => undefined);
+        await socket.close().catch(() => undefined);
+      },
+      isTransportOpen: () => open,
+      invalidPackets: 0,
+      messageQueue: Promise.resolve(),
+      writeQueue: Promise.resolve(),
+      lastPingSent: 0,
+      lastPongReceived: nowMs,
+      outboundPeerUri: peerUri,
+    };
+  }
+
+  private sendOutboundHandshake(session: Session, networkName: string, networkSecret: string): void {
+    const request = buildHandshakeRequest(networkName, networkSecret);
+    session.networkName = networkName;
+    session.networkSecretDigestPrefix = hex(request.networkSecretDigest).slice(0, 12) || undefined;
+    session.keys = undefined;
+    session.handshakeAccepted = false;
+    session.outboundHandshakeSent = true;
+    const payload = encodeHandshake(request);
+    const frame = createEasyTierFrame({ fromPeerId: EDGE_PEER_ID, toPeerId: 0, packetType: EasyTierPacketType.HandShake, flags: 0, forwardCounter: 1, reserved: 0 }, payload);
+    this.emitFrame(session, frame);
+    this.addEvent(session.roomId, 'handshake_seen', 'outbound tcp handshake sent', session);
+  }
+
+  private async readOutboundTcp(session: Session, reader: ReadableStreamDefaultReader<Uint8Array>): Promise<void> {
+    const decoder = new TcpTunnelFrameDecoder();
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (!this.sessions.has(session.sessionId)) break;
+        const message = toArrayBuffer(value);
+        if (!message) {
+          this.invalid(session, 'unsupported outbound tcp chunk type');
+          continue;
+        }
+        session.lastSeen = new Date().toISOString();
+        session.rxBytes += message.byteLength;
+        this.traffic.rxBytes += message.byteLength;
+        if (message.byteLength > MAX_FRAME_SIZE) {
+          this.invalid(session, 'tcp chunk size limit exceeded');
+          continue;
+        }
+        const frames = decoder.push(message);
+        if (!frames) {
+          this.invalid(session, 'invalid EasyTier TCP tunnel frame');
+          this.closeSessionTransport(session, 1008, 'invalid tcp frame');
+          break;
+        }
+        for (const frame of frames) await this.onEasyTierFrame(session, frame);
+      }
+    } finally {
+      this.disconnect(session);
+    }
+  }
+
+  private outboundTcpSession(peerUri: string): Session | undefined {
+    return [...this.sessions.values()].find((session) => session.transportKind === 'tcp-outbound' && session.outboundPeerUri === peerUri);
+  }
+
+  private closeSessionTransport(session: Session, code?: number, reason?: string): void {
+    this.state.waitUntil(Promise.resolve(session.closeTransport(code, reason)).catch(() => undefined));
+  }
+
+  private queueOutboundTcpReconnect(roomId: string): void {
+    if (resolveOutboundTcpPeers(this.env, roomId).length === 0) return;
+    this.state.waitUntil(new Promise((resolve) => setTimeout(resolve, 5_000)).then(() => this.ensureConfiguredOutboundTcp(roomId)));
   }
 
   private async seed(request: Request, roomId: string): Promise<Response> {
@@ -625,9 +876,12 @@ export class RelayRoom implements DurableObject {
   private snapshot(roomId: string): RoomSnapshot {
     if (this.pruneStaleRouteState()) this.queueControlStatePersist();
     const livePeers = [...this.sessions.values()].map(({
-      ws: _ws,
+      sendRawFrame: _sendRawFrame,
+      closeTransport: _closeTransport,
+      isTransportOpen: _isTransportOpen,
       invalidPackets: _invalidPackets,
       messageQueue: _messageQueue,
+      writeQueue: _writeQueue,
       keys: _keys,
       serverSessionId: _serverSessionId,
       handshakeAccepted: _handshakeAccepted,
@@ -635,6 +889,8 @@ export class RelayRoom implements DurableObject {
       lastPingSent: _lastPingSent,
       lastPongReceived: _lastPongReceived,
       ospfDescriptor: _ospfDescriptor,
+      outboundPeerUri: _outboundPeerUri,
+      outboundHandshakeSent: _outboundHandshakeSent,
       ...peer
     }) => peer);
     const livePeerIds = new Set(livePeers.map((peer) => peer.peerId).filter((peerId): peerId is number => peerId !== undefined));
@@ -689,7 +945,7 @@ export class RelayRoom implements DurableObject {
     for (const peerId of this.peers.keys()) peerIds.add(peerId);
     for (const peerId of this.routePeers.keys()) peerIds.add(peerId);
     const peerCount = peerIds.size + this.seededPeers.length;
-    const websocketCount = this.sessions.size + this.seededPeers.length;
+    const websocketCount = [...this.sessions.values()].filter((session) => session.transportKind === 'websocket').length + this.seededPeers.length;
     return { roomId, peerCount, websocketCount, bytes: this.traffic.rxBytes + this.traffic.txBytes, lastActivity, traffic: this.traffic, peers, recentEvents: this.events.slice(-50), topology: this.snapshotTopology(roomId) };
   }
 
@@ -814,15 +1070,15 @@ export class RelayRoom implements DurableObject {
 
   private runHeartbeatMaintenance(now = Date.now()): void {
     for (const session of [...this.sessions.values()]) {
-      if (session.ws.readyState !== WS_OPEN) {
+      if (!session.isTransportOpen()) {
         this.disconnect(session);
         continue;
       }
 
       const lastSeen = Date.parse(session.lastSeen);
       if (session.peerId && session.lastPingSent > 0 && Number.isFinite(lastSeen) && now - lastSeen > CONNECTION_TIMEOUT_MS) {
-        this.addEvent(session.roomId, 'disconnected', 'websocket heartbeat timeout', session);
-        session.ws.close(1001, 'heartbeat timeout');
+        this.addEvent(session.roomId, 'disconnected', `${session.transportKind} heartbeat timeout`, session);
+        this.closeSessionTransport(session, 1001, 'heartbeat timeout');
         this.disconnect(session);
         continue;
       }
@@ -894,7 +1150,9 @@ export class RelayRoom implements DurableObject {
   }
 
   private async ensureMaintenanceAlarm(): Promise<void> {
-    if (this.sessions.size === 0 && !this.hasObservedNetworkState()) return;
+    const roomId = this.currentRoomId();
+    const hasConfiguredOutbound = roomId ? resolveOutboundTcpPeers(this.env, roomId).length > 0 : false;
+    if (this.sessions.size === 0 && !this.hasObservedNetworkState() && !hasConfiguredOutbound) return;
     const existing = await this.state.storage.getAlarm();
     const next = Date.now() + MAINTENANCE_ALARM_MS;
     if (existing === null || existing <= Date.now()) await this.state.storage.setAlarm(next);
@@ -1249,6 +1507,61 @@ function parseNetworkSecretMap(raw: string | undefined): Map<string, string> {
   } catch {
     return new Map();
   }
+}
+
+export function resolveOutboundTcpPeers(
+  env: Pick<Env, 'EASYTIER_PUBLIC_PEER_TCP' | 'EASYTIER_OUTBOUND_TCP_PEERS'>,
+  roomId: string,
+): TcpPeerAddress[] {
+  const candidates = [
+    ...parseOutboundTcpPeerConfig(env.EASYTIER_OUTBOUND_TCP_PEERS, roomId),
+    ...splitPeerList(env.EASYTIER_PUBLIC_PEER_TCP),
+  ];
+  const peers = new Map<string, TcpPeerAddress>();
+  for (const candidate of candidates) {
+    const peer = parseTcpPeerUri(candidate);
+    if (peer) peers.set(peer.uri, peer);
+  }
+  return [...peers.values()];
+}
+
+function parseOutboundTcpPeerConfig(raw: string | undefined, roomId: string): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed === 'string') return splitPeerList(parsed);
+    if (Array.isArray(parsed)) return collectOutboundPeerValues(parsed);
+    if (!parsed || typeof parsed !== 'object') return [];
+    const record = parsed as Record<string, unknown>;
+    const roomValue = record[roomId] ?? record.default ?? record['*'];
+    return collectOutboundPeerValues(roomValue);
+  } catch {
+    return splitPeerList(raw);
+  }
+}
+
+function collectOutboundPeerValues(value: unknown): string[] {
+  if (typeof value === 'string') return splitPeerList(value);
+  if (Array.isArray(value)) return value.flatMap(collectOutboundPeerValues);
+  if (!value || typeof value !== 'object') return [];
+  const record = value as Record<string, unknown>;
+  return [
+    ...collectOutboundPeerValues(record.uri),
+    ...collectOutboundPeerValues(record.uris),
+    ...collectOutboundPeerValues(record.peer),
+    ...collectOutboundPeerValues(record.peers),
+    ...collectOutboundPeerValues(record.tcp),
+    ...collectOutboundPeerValues(record.tcpPeers),
+  ];
+}
+
+function splitPeerList(raw: string | undefined): string[] {
+  if (!raw) return [];
+  return raw.split(/[,\n]/).map((item) => item.trim()).filter(Boolean);
+}
+
+function outboundTcpKey(roomId: string, peerUri: string): string {
+  return `${roomId}\n${peerUri}`;
 }
 
 function safeU32(value: unknown, fallback: number): number {

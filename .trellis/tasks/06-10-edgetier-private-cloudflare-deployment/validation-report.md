@@ -144,7 +144,7 @@ Clean validation peer set:
 
 Notes:
 
-- Cloudflare Workers still cannot actively dial the existing `udp://` or `tcp://` EasyTier peers and cannot run TUN/native `easytier-core`. A real EasyTier node must initiate the WSS connection to Worker.
+- Superseded by the later outbound TCP validation below: at this point Worker could not yet actively dial EasyTier peers. After `6a15c4e3`, Worker can actively dial normal `tcp://` peers, but still cannot dial `udp://`, do TCP/UDP hole punching, or run TUN/native `easytier-core`.
 - Once a real node connects over WSS with the matching `home-mesh` secret, Worker is accepted as an EasyTier control-plane peer and can decode route/topology information from that bridged node.
 - Repeated smoke tests with the generic config generated multiple temporary peer ids for `toe2-ubuntu24`; EasyTier retained a short-lived stale route entry, so a later smoke snapshot temporarily showed 6 peers. This was test churn, not a Worker decode issue. A persistent node should use a stable `instance_id`.
 - Temporary local and remote `/tmp` configs/logs/tokens containing the real network secret or WSS token were removed after validation.
@@ -208,3 +208,44 @@ Real `home-mesh` smoke window:
 - `/api/rooms/home-mesh/topology` reported 6 nodes / 16 edges: 14 conn-bitmap edges and 2 PeerCenter latency edges, average latency about 151 ms.
 - Test node log showed Worker accepted as `dst_peer_id: 10000001` over WSS.
 - Temporary local and remote `/tmp` configs/logs/tokens were removed after evidence capture.
+
+## Outbound TCP Active Dial Validation
+
+Deployment version validated:
+
+- `6a15c4e3-3582-472d-9019-73b8147ed2ed`: Worker outbound TCP active dial implementation.
+
+Local/deploy gate:
+
+- `npm run typecheck`: passed.
+- `npm test`: passed, 66 tests.
+- `npm run build`: passed; Vite chunk-size warning only, Wrangler dry-run passed.
+- `npm run proto:check`: passed.
+- `npx wrangler deploy`: passed.
+
+Configuration:
+
+- Added Worker secret `EASYTIER_PUBLIC_PEER_TCP` from gitignored local env.
+- Existing `EASYTIER_NETWORK_NAME` / `EASYTIER_NETWORK_SECRET` secrets were reused. Secret values were not printed or committed.
+
+Online route checks:
+
+- `POST /api/auth/login`: `200`
+- `GET /api/health`: `200`, capabilities included `easytier-outbound-tcp`.
+- `GET /api/rooms/home-mesh/outbound-tcp`: `200`
+- `POST /api/rooms/home-mesh/outbound-tcp`: `200`
+
+Outbound TCP evidence:
+
+- Worker actively connected to the configured `tcp://` EasyTier public peer from Cloudflare using `cloudflare:sockets`.
+- `/api/rooms/home-mesh/outbound-tcp` reported one configured peer with `connected=true`, `handshakeAccepted=true`, remote `peerId=1651819573`, and increasing rx/tx counters.
+- Recent events showed decoded EasyTier RPC traffic after the outbound handshake, including `DirectConnectorRpc` and `UdpHolePunchRpc` control-plane packets.
+- `/api/rooms/home-mesh` reported `peerCount=6`, `websocketCount=0`; the live session was `transportKind=tcp-outbound`.
+- Worker appeared as `10000001 edgetier-worker` and the TCP outbound remote decoded as `home-kwrt` with virtual IPv4 `10.144.1.1/24`.
+- `/api/rooms/home-mesh/topology` reported 6 nodes / 16 edges: 13 conn-bitmap edges and 3 PeerCenter latency edges, average latency about 199 ms.
+- Decoded route peers included `home-kwrt`, `rick-MRGF-XX`, `Xiaomi K80`, and stale `toe2` validation entries from earlier test runs.
+
+Updated conclusion:
+
+- Cloudflare Worker can now join the EasyTier control plane by actively dialing a normal `tcp://` EasyTier peer.
+- Cloudflare Worker still cannot dial `udp://`, perform TCP/UDP hole punching, run TUN, or carry L3 data plane traffic.

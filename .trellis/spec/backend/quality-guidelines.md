@@ -309,6 +309,105 @@ if (header.packetType === EasyTierPacketType.RpcReq && targetIsEdge && decoded.s
 
 ---
 
+## Scenario: EasyTier Outbound TCP Active Dial
+
+### 1. Scope / Trigger
+
+- Trigger: adding/changing Worker outbound EasyTier peer dialing, `cloudflare:sockets`, TCP tunnel framing, outbound room configuration, or outbound TCP observer API.
+- Applies to `src/easytier/tcp-frame.ts`, `src/durable-objects/relay-room.ts`, `src/worker/env.ts`, `src/observer/api.ts`, and `src/observer/types.ts`.
+
+### 2. Signatures
+
+```typescript
+encodeTcpTunnelFrame(payload: Uint8Array | ArrayBuffer): Uint8Array
+new TcpTunnelFrameDecoder(maxPayloadSize?: number).push(chunk: Uint8Array | ArrayBuffer): ArrayBuffer[] | null
+parseTcpPeerUri(value: string): TcpPeerAddress | null
+resolveOutboundTcpPeers(env, roomId): TcpPeerAddress[]
+```
+
+API:
+
+```text
+GET  /api/rooms/:roomId/outbound-tcp  -> OutboundTcpStatus
+POST /api/rooms/:roomId/outbound-tcp  -> OutboundTcpStatus after ensuring configured peers are dialed
+```
+
+Environment:
+
+```text
+EASYTIER_PUBLIC_PEER_TCP       # optional single-network tcp://host:port fallback
+EASYTIER_OUTBOUND_TCP_PEERS    # optional JSON/string list; supports per-room maps
+```
+
+### 3. Contracts
+
+- Official EasyTier 2.6.4 TCP tunnel framing is `u32 little-endian payload length` followed by one EasyTier peer-manager frame.
+- TCP payload is the existing 16-byte EasyTier header plus body; it is not a WebSocket binary message and not protobuf-delimited by itself.
+- Official `FramedReader::new(..., TCP_MTU_BYTES)` uses `TCP_MTU_BYTES = 2000`; outbound TCP sends must not write a single payload larger than 2000 bytes.
+- Worker outbound TCP is client-side EasyTier handshake: send `HandshakeRequest` with `fromPeerId=EDGE_PEER_ID`, `toPeerId=0`, `packetType=HandShake`, then validate the server's `HandshakeRequest` response.
+- Outbound TCP must reuse the same AES-GCM decrypt, RPC decode, route push, PeerCenter, topology, and observer paths as WSS sessions after handshake acceptance.
+- Use dynamic `import('cloudflare:sockets')` inside the dial path so local Vitest can import protocol modules without resolving Cloudflare runtime-only modules.
+- Do not log network secrets, full digests, raw TCP payload hex, or configured peer credentials in relay events.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|---|---|
+| TCP URI is missing/invalid/non-`tcp://` | Ignore it in `resolveOutboundTcpPeers`; do not dial |
+| No network secret configured for room | Record safe `decode_error`, do not dial |
+| TCP frame length `< EASYTIER_HEADER_SIZE` or `> 2000` | Decoder returns `null`; relay records decode/limit behavior |
+| Outbound EasyTier frame is too large for TCP | Record `limit_exceeded` and skip send; do not tear down an otherwise healthy socket only because of the skipped oversized push |
+| Server handshake magic/version/network/digest mismatch | Record `decode_error` and close transport |
+| TCP socket closes | Disconnect session, clean route/PeerCenter state by source peer, and queue reconnect when configured peers still exist |
+| `GET /outbound-tcp` | Return configured/connecting/connected/handshake status without exposing secrets |
+
+### 5. Good/Base/Bad Cases
+
+- Good: `EASYTIER_PUBLIC_PEER_TCP=tcp://example.com:11010` lets the room actively join via TCP when `/api/rooms/:roomId` or `/outbound-tcp` is accessed.
+- Good: `EASYTIER_OUTBOUND_TCP_PEERS={"home":["tcp://a:11010"],"lab":{"peers":"tcp://b:11010"}}` scopes TCP peers per room.
+- Base: no outbound TCP env is configured; WSS inbound behavior remains unchanged.
+- Bad: treating TCP stream chunks as complete EasyTier frames without the 4-byte length prefix.
+- Bad: top-level importing `cloudflare:sockets` in modules used by unit tests.
+- Bad: rebinding the outbound session to `EDGE_PEER_ID` instead of the remote peer id from the server handshake.
+
+### 6. Tests Required
+
+- Unit test TCP length-prefix encode/decode for single, fragmented, coalesced, too-short, and too-large frames.
+- Unit test `parseTcpPeerUri` accepts `tcp://host:port` and rejects unsupported schemes or incomplete URIs.
+- Unit test `resolveOutboundTcpPeers` for global fallback, per-room JSON maps, duplicates, and invalid entries.
+- Full gate after changes: `npm run typecheck`, `npm test`, `npm run build`, `npm run proto:check`.
+- Live validation before claiming compatibility: deployed Worker reports `handshakeAccepted=true`, increasing rx/tx, and decoded route/topology data from a real EasyTier node.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```typescript
+// Sends the EasyTier frame directly on a TCP socket.
+await writer.write(createEasyTierFrame(header, payload));
+```
+
+#### Correct
+
+```typescript
+const frame = createEasyTierFrame(header, payload);
+await writer.write(encodeTcpTunnelFrame(frame));
+```
+
+#### Wrong
+
+```typescript
+import { connect } from 'cloudflare:sockets';
+```
+
+#### Correct
+
+```typescript
+const { connect } = await import('cloudflare:sockets');
+```
+
+---
+
 ## Forbidden Patterns
 
 - Do not implement room-wide packet broadcast for EasyTier data plane packets.

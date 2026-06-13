@@ -23,6 +23,7 @@ export function PeerDetail({ peer }: PeerDetailProps) {
       <div className="detail-grid">
         <Row label="Peer ID" value={peer.peerId ?? 'unknown (no parseable header yet)'} muted={peer.peerId === undefined} />
         <Row label="Session ID" value={peer.sessionId} />
+        <Row label="Transport" value={peer.transportKind ?? 'route-only'} />
         <Row label="Network name" value={peer.networkName ?? 'not observed'} muted={!peer.networkName} />
         <Row label="Secret digest prefix" value={peer.networkSecretDigestPrefix ?? 'not observed'} muted={!peer.networkSecretDigestPrefix} />
         <Row label="Hostname" value={peer.hostname ?? 'not decoded'} muted={!peer.hostname} />
@@ -54,6 +55,7 @@ export function PeerTable({ peers, selectedSession, onSelect }: PeerTableProps) 
   return <Table>
     <Table.Header><Table.Row>
       <Table.Head>Peer</Table.Head>
+      <Table.Head>Transport</Table.Head>
       <Table.Head>Hostname</Table.Head>
       <Table.Head>Virtual IP</Table.Head>
       <Table.Head>NAT</Table.Head>
@@ -71,6 +73,7 @@ export function PeerTable({ peers, selectedSession, onSelect }: PeerTableProps) 
               <Badge variant="outline">{peer.peerId ?? 'unknown'}</Badge>
             </button>
           </Table.Cell>
+          <Table.Cell>{peer.transportKind ?? 'route'}</Table.Cell>
           <Table.Cell>{peer.hostname ?? 'unknown'}</Table.Cell>
           <Table.Cell>{peer.virtualIpv4 ?? peer.virtualIpv6 ?? 'unknown'}</Table.Cell>
           <Table.Cell>{peer.udpNatType ?? 'unknown'}</Table.Cell>
