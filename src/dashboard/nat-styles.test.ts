@@ -3,15 +3,17 @@ import { natStyleFor, nodeColorForPeerId } from './nat-styles';
 
 describe('NAT styles', () => {
   it('returns style for known NAT types', () => {
-    expect(natStyleFor('OpenInternet')).toHaveProperty('color');
     expect(natStyleFor('OpenInternet')).toHaveProperty('icon', '🌐');
-    expect(natStyleFor('Symmetric')).toHaveProperty('strokeDasharray', '4 4');
+    expect(natStyleFor('OpenInternet')).toHaveProperty('shape', 'circle');
+    expect(natStyleFor('Symmetric')).toHaveProperty('shape', 'diamond');
     expect(natStyleFor('PortRestricted')).toHaveProperty('icon', '🟠');
+    expect(natStyleFor('PortRestricted')).toHaveProperty('shape', 'square');
   });
 
   it('falls back to Unknown style for null or undefined NAT', () => {
     const unknownStyle = natStyleFor(null, null);
-    expect(unknownStyle).toHaveProperty('strokeDasharray', '2 2');
+    expect(unknownStyle).toHaveProperty('shape', 'circle');
+    expect(unknownStyle).toHaveProperty('icon', '❓');
   });
 
   it('prefers UDP NAT type over TCP', () => {
@@ -26,10 +28,5 @@ describe('NAT styles', () => {
 
     const color3 = nodeColorForPeerId(789012);
     expect(color3).toBeTruthy();
-  });
-
-  it('prefers NAT-based color when NAT type is known', () => {
-    const natColor = nodeColorForPeerId(123456, 'OpenInternet');
-    expect(natColor).toBeTruthy();
   });
 });

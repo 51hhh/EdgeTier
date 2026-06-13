@@ -3,63 +3,72 @@ import { ChartPalette } from '@cloudflare/kumo';
 export type NatType = 'Unknown' | 'OpenInternet' | 'NoPAT' | 'FullCone' | 'Restricted' | 'PortRestricted' | 'Symmetric' | 'SymUdpFirewall' | 'SymmetricEasyInc' | 'SymmetricEasyDec';
 
 export interface NatStyle {
-  color: string;
-  strokeDasharray?: string;
-  strokeWidth?: number;
-  icon?: string;
+  icon: string;
+  shape: 'circle' | 'square' | 'diamond' | 'hexagon';
+  badgeColor: string;
+  description: string;
 }
 
 export const NAT_STYLES: Record<NatType, NatStyle> = {
   Unknown: {
-    color: ChartPalette.semantic('Neutral'),
-    strokeDasharray: '2 2',
+    icon: '❓',
+    shape: 'circle',
+    badgeColor: ChartPalette.semantic('Neutral'),
+    description: 'Unknown NAT',
   },
   OpenInternet: {
-    color: ChartPalette.semantic('Success'),
     icon: '🌐',
+    shape: 'circle',
+    badgeColor: ChartPalette.semantic('Success'),
+    description: 'Open Internet',
   },
   NoPAT: {
-    color: ChartPalette.categorical(2),
     icon: '🔓',
+    shape: 'circle',
+    badgeColor: ChartPalette.categorical(2),
+    description: 'No PAT',
   },
   FullCone: {
-    color: ChartPalette.categorical(0),
     icon: '🔵',
+    shape: 'hexagon',
+    badgeColor: ChartPalette.categorical(0),
+    description: 'Full Cone NAT',
   },
   Restricted: {
-    color: ChartPalette.categorical(4),
-    strokeWidth: 2.5,
     icon: '🟡',
+    shape: 'square',
+    badgeColor: ChartPalette.categorical(4),
+    description: 'Restricted NAT',
   },
   PortRestricted: {
-    color: ChartPalette.categorical(5),
-    strokeWidth: 2.5,
-    strokeDasharray: '6 2',
     icon: '🟠',
+    shape: 'square',
+    badgeColor: ChartPalette.categorical(5),
+    description: 'Port Restricted NAT',
   },
   Symmetric: {
-    color: ChartPalette.semantic('Attention'),
-    strokeWidth: 3,
-    strokeDasharray: '4 4',
     icon: '🔴',
+    shape: 'diamond',
+    badgeColor: ChartPalette.semantic('Attention'),
+    description: 'Symmetric NAT',
   },
   SymUdpFirewall: {
-    color: ChartPalette.semantic('Attention'),
-    strokeWidth: 2.5,
-    strokeDasharray: '3 3',
     icon: '🔥',
+    shape: 'diamond',
+    badgeColor: ChartPalette.semantic('Attention'),
+    description: 'Symmetric UDP Firewall',
   },
   SymmetricEasyInc: {
-    color: ChartPalette.categorical(7),
-    strokeWidth: 2.5,
-    strokeDasharray: '5 2 2 2',
     icon: '🔺',
+    shape: 'diamond',
+    badgeColor: ChartPalette.categorical(7),
+    description: 'Symmetric Easy Inc',
   },
   SymmetricEasyDec: {
-    color: ChartPalette.categorical(8),
-    strokeWidth: 2.5,
-    strokeDasharray: '5 2 2 2',
     icon: '🔻',
+    shape: 'diamond',
+    badgeColor: ChartPalette.categorical(8),
+    description: 'Symmetric Easy Dec',
   },
 };
 
@@ -68,11 +77,8 @@ export function natStyleFor(udpNatType?: string | null, tcpNatType?: string | nu
   return NAT_STYLES[natType] ?? NAT_STYLES.Unknown;
 }
 
-export function nodeColorForPeerId(peerId: number, natType?: string | null): string {
-  if (natType && natType !== 'Unknown') {
-    return natStyleFor(natType).color;
-  }
-  // Fallback: deterministic color based on peer ID
+export function nodeColorForPeerId(peerId: number): string {
+  // Deterministic color based on peer ID for node distinction
   const colorIndex = Math.abs(peerId) % 9;
   return ChartPalette.categorical(colorIndex);
 }

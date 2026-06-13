@@ -143,6 +143,43 @@ function ConnectionGraph({ topology, nodeByPeerId, t }: { topology?: TopologySna
     return new Map(edgeLabels.map((label) => [label.linkKey, label]));
   }, [graphLinks, positions]);
   const crossingCount = useMemo(() => detectEdgeCrossings(graphLinks, positions), [graphLinks, positions]);
+
+  const [transform, setTransform] = useState({ x: 0, y: 0, scale: 1 });
+  const svgRef = useRef<SVGSVGElement>(null);
+  const [isPanning, setIsPanning] = useState(false);
+  const [panStart, setPanStart] = useState({ x: 0, y: 0 });
+
+  const handleWheel = (e: React.WheelEvent<SVGSVGElement>) => {
+    e.preventDefault();
+    const delta = e.deltaY > 0 ? 0.9 : 1.1;
+    const newScale = Math.max(0.5, Math.min(3, transform.scale * delta));
+    setTransform(prev => ({ ...prev, scale: newScale }));
+  };
+
+  const handleMouseDown = (e: React.MouseEvent<SVGSVGElement>) => {
+    if (e.button === 0) {
+      setIsPanning(true);
+      setPanStart({ x: e.clientX - transform.x, y: e.clientY - transform.y });
+    }
+  };
+
+  const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
+    if (isPanning) {
+      setTransform(prev => ({
+        ...prev,
+        x: e.clientX - panStart.x,
+        y: e.clientY - panStart.y,
+      }));
+    }
+  };
+
+  const handleMouseUp = () => {
+    setIsPanning(false);
+  };
+
+  const handleDoubleClick = () => {
+    setTransform({ x: 0, y: 0, scale: 1 });
+  };
   if (graphPeerIds.length === 0) {
     return <LayerCard>
       <LayerCard.Secondary>{t('topology.connectionGraph')}</LayerCard.Secondary>
@@ -161,50 +198,58 @@ function ConnectionGraph({ topology, nodeByPeerId, t }: { topology?: TopologySna
           </div>
         </div>
         <div className="topology-graph" role="img" aria-label={t('topology.connectionGraph')}>
-          <svg viewBox={`0 0 ${GRAPH_WIDTH} ${GRAPH_HEIGHT}`}>
-            {graphLinks.map((link) => {
-              const from = positions.get(link.fromPeerId);
-              const to = positions.get(link.toPeerId);
-              if (!from || !to) return null;
-              const label = graphLinkLabel(link, graphLinks.length);
-              const linkKey = `${link.fromPeerId}-${link.toPeerId}`;
-              const labelPos = labelPositions.get(linkKey);
-              const labelX = labelPos ? Math.round(labelPos.x + labelPos.offsetX) : Math.round((from.x + to.x) / 2);
-              const labelY = labelPos ? Math.round(labelPos.y + labelPos.offsetY) : Math.round((from.y + to.y) / 2);
-              return <g key={linkKey}>
-                <title>{graphLinkTitle(link, nodeByPeerId, t)}</title>
-                <line className="graph-edge" x1={from.x} y1={from.y} x2={to.x} y2={to.y} />
-                {label && <g className="graph-edge-label-group" transform={`translate(${labelX} ${labelY})`}>
-                  <rect className="graph-edge-label-bg" x={edgeLabelBgX(label)} y={-9} width={edgeLabelBgWidth(label)} height={16} rx={4} />
-                  <text className="graph-edge-label" x={0} y={3}>{label}</text>
-                </g>}
-              </g>;
-            })}
-            {graphPeerIds.map((peerId) => {
-              const pos = positions.get(peerId);
-              if (!pos) return null;
-              const node = peerFor(peerId, nodeByPeerId);
-              const nodeColor = nodeColorForPeerId(node.peerId, node.udpNatType);
-              const natStyle = natStyleFor(node.udpNatType, node.tcpNatType);
-              return <g key={node.peerId} className="graph-node-group" transform={`translate(${pos.x} ${pos.y})`}>
-                <title>{peerFullLabel(node, t('common.unknownPeer')) + (node.udpNatType ? ` | NAT: ${node.udpNatType}` : '')}</title>
-                <circle
-                  className="graph-node"
-                  cx={0}
-                  cy={0}
-                  r={nodeRadius(pos)}
-                  style={{
-                    fill: nodeColor,
-                    strokeWidth: natStyle.strokeWidth || 2,
-                    strokeDasharray: natStyle.strokeDasharray || 'none'
-                  }}
-                />
-                <text className="graph-node-label" x={0} y={4}>{shortPeerId(node.peerId)}</text>
-                <text className="graph-node-host-label" x={0} y={nodeRadius(pos) + 16}>{compactPeerDisplayName(node, t('common.routeDataPending'))}</text>
-                {natStyle.icon && <text className="graph-node-nat-icon" x={nodeRadius(pos) - 6} y={-nodeRadius(pos) + 8} style={{ fontSize: '14px' }}>{natStyle.icon}</text>}
-              </g>;
-            })}
+          <svg
+            ref={svgRef}
+            viewBox={`0 0 ${GRAPH_WIDTH} ${GRAPH_HEIGHT}`}
+            style={{ cursor: isPanning ? 'grabbing' : 'grab' }}
+            onWheel={handleWheel}
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
+            onMouseUp={handleMouseUp}
+            onMouseLeave={handleMouseUp}
+            onDoubleClick={handleDoubleClick}
+          >
+            <g transform={`translate(${transform.x} ${transform.y}) scale(${transform.scale})`} className="topology-content">
+              {graphLinks.map((link) => {
+                const from = positions.get(link.fromPeerId);
+                const to = positions.get(link.toPeerId);
+                if (!from || !to) return null;
+                const label = graphLinkLabel(link, graphLinks.length);
+                const linkKey = `${link.fromPeerId}-${link.toPeerId}`;
+                const labelPos = labelPositions.get(linkKey);
+                const labelX = labelPos ? Math.round(labelPos.x + labelPos.offsetX) : Math.round((from.x + to.x) / 2);
+                const labelY = labelPos ? Math.round(labelPos.y + labelPos.offsetY) : Math.round((from.y + to.y) / 2);
+                return <g key={linkKey}>
+                  <title>{graphLinkTitle(link, nodeByPeerId, t)}</title>
+                  <line className="graph-edge" x1={from.x} y1={from.y} x2={to.x} y2={to.y} strokeWidth={2} />
+                  {label && <g className="graph-edge-label-group" transform={`translate(${labelX} ${labelY})`}>
+                    <rect className="graph-edge-label-bg" x={edgeLabelBgX(label)} y={-9} width={edgeLabelBgWidth(label)} height={16} rx={4} />
+                    <text className="graph-edge-label" x={0} y={3}>{label}</text>
+                  </g>}
+                </g>;
+              })}
+              {graphPeerIds.map((peerId) => {
+                const pos = positions.get(peerId);
+                if (!pos) return null;
+                const node = peerFor(peerId, nodeByPeerId);
+                const nodeColor = nodeColorForPeerId(node.peerId);
+                const natStyle = natStyleFor(node.udpNatType, node.tcpNatType);
+                const r = nodeRadius(pos);
+                return <g key={node.peerId} className="graph-node-group" transform={`translate(${pos.x} ${pos.y})`}>
+                  <title>{peerFullLabel(node, t('common.unknownPeer')) + (node.udpNatType ? ` | NAT: ${node.udpNatType}` : '')}</title>
+                  {renderNodeShape(natStyle.shape, r, nodeColor)}
+                  <text className="graph-node-label" x={0} y={4}>{shortPeerId(node.peerId)}</text>
+                  <text className="graph-node-host-label" x={0} y={r + 16}>{compactPeerDisplayName(node, t('common.routeDataPending'))}</text>
+                  <text className="graph-node-nat-icon" x={r - 6} y={-r + 8}>{natStyle.icon}</text>
+                </g>;
+              })}
+            </g>
           </svg>
+          <div className="graph-controls">
+            <button type="button" onClick={() => setTransform(prev => ({ ...prev, scale: Math.min(3, prev.scale * 1.2) }))} title="Zoom In">+</button>
+            <button type="button" onClick={() => setTransform(prev => ({ ...prev, scale: Math.max(0.5, prev.scale / 1.2) }))} title="Zoom Out">−</button>
+            <button type="button" onClick={handleDoubleClick} title="Reset View">⟲</button>
+          </div>
         </div>
         <div className="chart-legend">
           <span><i className="legend-swatch bitmap" />{t('topology.source.conn_bitmap')}</span>
@@ -433,4 +478,33 @@ function routeSourceLabel(source: RoutePathSnapshot['source'], t: Translator): s
   if (source === 'live_peer') return t('topology.source.live_peer');
   if (source === 'unreachable') return t('topology.source.unreachable');
   return t('topology.source.conn_bitmap');
+}
+
+function renderNodeShape(shape: 'circle' | 'square' | 'diamond' | 'hexagon', radius: number, fillColor: string): React.ReactNode {
+  const strokeColor = 'var(--color-kumo-base)';
+  const strokeWidth = 2.5;
+
+  switch (shape) {
+    case 'circle':
+      return <circle className="graph-node" cx={0} cy={0} r={radius} fill={fillColor} stroke={strokeColor} strokeWidth={strokeWidth} />;
+
+    case 'square': {
+      const size = radius * 1.6;
+      const offset = size / 2;
+      return <rect className="graph-node" x={-offset} y={-offset} width={size} height={size} rx={3} fill={fillColor} stroke={strokeColor} strokeWidth={strokeWidth} />;
+    }
+
+    case 'diamond': {
+      const size = radius * 1.8;
+      const points = `0,${-size} ${size},0 0,${size} ${-size},0`;
+      return <polygon className="graph-node" points={points} fill={fillColor} stroke={strokeColor} strokeWidth={strokeWidth} />;
+    }
+
+    case 'hexagon': {
+      const size = radius;
+      const h = size * Math.sqrt(3) / 2;
+      const points = `${size},0 ${size/2},${h} ${-size/2},${h} ${-size},0 ${-size/2},${-h} ${size/2},${-h}`;
+      return <polygon className="graph-node" points={points} fill={fillColor} stroke={strokeColor} strokeWidth={strokeWidth} />;
+    }
+  }
 }
