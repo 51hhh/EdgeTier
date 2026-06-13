@@ -4,6 +4,7 @@ import type { ConnectionMatrixSnapshot, RoutePathSnapshot, RoutePeerSnapshot, To
 import { EDGE_PEER_ID } from '../../easytier/constants';
 import { formatPercent } from '../format';
 import type { Translator } from '../i18n';
+import { getNatDescription } from '../nat-descriptions';
 import { nodeColorForPeerId } from '../nat-styles';
 import { compactPeerDisplayName, peerDisplayName, peerFullLabel, shortPeerId } from '../peer-display';
 import { buildTopologyGraphLinks, computeEdgeLabelPositions, computeTopologyGraphLayout, detectEdgeCrossings, topologyGraphPeerIds, type TopologyGraphLink, type TopologyGraphPosition } from '../topology-display';
@@ -284,8 +285,8 @@ function ConnectionGraph({ topology, nodeByPeerId, t }: { topology?: TopologySna
                 <button onClick={() => setSelectedNode(null)} aria-label="Close">×</button>
               </div>
               <div className="node-info-content">
-                {node.udpNatType && <div><strong>UDP NAT:</strong> {node.udpNatType}</div>}
-                {node.tcpNatType && <div><strong>TCP NAT:</strong> {node.tcpNatType}</div>}
+                {node.udpNatType && <div><strong>UDP NAT:</strong> {node.udpNatType} ({getNatDescription(node.udpNatType)})</div>}
+                {node.tcpNatType && <div><strong>TCP NAT:</strong> {node.tcpNatType} ({getNatDescription(node.tcpNatType)})</div>}
                 {node.virtualIpv4 && <div><strong>IP:</strong> {node.virtualIpv4}</div>}
                 {node.easytierVersion && <div><strong>Version:</strong> {node.easytierVersion}</div>}
                 {node.latencyMs !== undefined && <div><strong>Latency:</strong> {node.latencyMs} ms</div>}
