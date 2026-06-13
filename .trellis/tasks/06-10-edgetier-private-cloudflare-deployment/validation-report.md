@@ -286,3 +286,53 @@ Security notes:
 
 - Admin credentials, relay tokens, and EasyTier secrets were read only from gitignored local env files.
 - Validation output recorded only status codes and aggregate topology fields; no secret values or full tokens were printed or committed.
+
+## Topology Graph Aggregation And Permanent `toe2` Node
+
+Deployment version validated:
+
+- `aa33f866-e03e-4ad7-956f-8750589430a8`: dashboard topology graph aggregation deployed to Cloudflare.
+
+Local/deploy gate:
+
+- `npm run typecheck`: passed.
+- `npm test`: passed, 91 tests.
+- `npm run proto:check`: passed.
+- `npm run build`: passed; Vite chunk-size warning only, Wrangler dry-run passed.
+- `npx wrangler deploy`: passed; three updated dashboard assets uploaded.
+
+Dashboard/UI changes:
+
+- The SVG topology graph now aggregates directed EasyTier edges into undirected display links by peer pair.
+- Link display preserves source metadata (`conn_bitmap`, `PeerCenter`, or both), directed edge count, and averaged latency when present.
+- The raw topology edge table remains unchanged and still shows the API's original directed edge records.
+- A Vitest regression covers the graph-link aggregation helper.
+
+Permanent `toe2` node setup:
+
+- Installed `easytier-core` and `easytier-cli` 2.6.4 to `/usr/local/bin` on `toe2-ubuntu24`.
+- Wrote `/etc/easytier/home-mesh.toml` with root ownership and mode `600`.
+- Created and enabled `/etc/systemd/system/easytier-home-mesh.service`.
+- Service status: `enabled` and `active`.
+- Runtime evidence: `tun0` received `10.144.1.3/24`; EasyTier logged public-peer TCP/UDP connectivity and an additional UDP peer.
+
+Online route checks:
+
+- `POST /api/auth/login`: `200`
+- `GET /api/health` with session cookie: `200`
+- `GET /dashboard/`: `200`
+- `GET /api/rooms/home-mesh`: `200`
+- `GET /api/rooms/home-mesh/topology`: `200`
+
+Real `home-mesh` smoke window:
+
+- `/api/rooms/home-mesh` reported `peerCount=5`, `websocketCount=0`.
+- Decoded hostnames included `edgetier-worker`, `home-kwrt`, `rick-MRGF-XX`, `Xiaomi K80`, and `toe2-ubuntu24`.
+- `toe2-ubuntu24` decoded as peer `1311292540` with virtual IPv4 `10.144.1.3/24`.
+- `/api/rooms/home-mesh/topology` reported 5 nodes / 23 directed edges / 4 reachable routes.
+- The deployed graph aggregation reduces those live directed edges to 6 displayed peer-pair links.
+
+Security notes:
+
+- The EasyTier network secret and public peer URIs were read from gitignored local env files and written only to the remote root-owned EasyTier config.
+- Validation output and this report omit secret values, relay tokens, and unredacted config contents.

@@ -5,6 +5,7 @@ import { EDGE_PEER_ID } from '../../easytier/constants';
 import { formatPercent } from '../format';
 import type { Translator } from '../i18n';
 import { peerDisplayName, peerFullLabel, shortPeerId } from '../peer-display';
+import { buildTopologyGraphLinks, type TopologyGraphLink } from '../topology-display';
 
 interface TopologyProps {
   topology?: TopologySnapshot | null;
@@ -137,24 +138,26 @@ function ConnectionGraph({ topology, nodeByPeerId, t }: { topology?: TopologySna
     </LayerCard>;
   }
   const positions = graphPositions(nodes.map((node) => node.peerId));
+  const graphLinks = buildTopologyGraphLinks(edges);
   return <LayerCard>
     <LayerCard.Secondary>{t('topology.connectionGraph')} {topology?.updatedAt ? <Badge variant="outline">{topology.updatedAt}</Badge> : null}</LayerCard.Secondary>
     <LayerCard.Primary>
       <div className="stack compact">
         <div className="graph-toolbar">
           <Text as="p" variant="secondary" size="sm">{t('topology.connectionGraphHelp')}</Text>
-          <Badge variant="outline">{t('topology.graphStats', { nodes: nodes.length, edges: edges.length })}</Badge>
+          <Badge variant="outline">{t('topology.graphStats', { nodes: nodes.length, edges: graphLinks.length })}</Badge>
         </div>
         <div className="topology-graph" role="img" aria-label={t('topology.connectionGraph')}>
           <svg viewBox={`0 0 ${GRAPH_WIDTH} ${GRAPH_HEIGHT}`}>
-            {edges.map((edge) => {
-              const from = positions.get(edge.fromPeerId);
-              const to = positions.get(edge.toPeerId);
+            {graphLinks.map((link) => {
+              const from = positions.get(link.fromPeerId);
+              const to = positions.get(link.toPeerId);
               if (!from || !to) return null;
-              return <g key={`${edge.source}-${edge.fromPeerId}-${edge.toPeerId}`}>
-                <title>{`${peerFullLabel(peerFor(edge.fromPeerId, nodeByPeerId), t('common.unknownPeer'))} -> ${peerFullLabel(peerFor(edge.toPeerId, nodeByPeerId), t('common.unknownPeer'))}`}</title>
-                <line className={`graph-edge ${edge.source === 'peer_center' ? 'peer-center' : 'conn-bitmap'}`} x1={from.x} y1={from.y} x2={to.x} y2={to.y} />
-                {edge.latencyMs !== undefined && <text className="graph-edge-label" x={(from.x + to.x) / 2} y={(from.y + to.y) / 2}>{edge.latencyMs} ms</text>}
+              const label = graphLinkLabel(link);
+              return <g key={`${link.fromPeerId}-${link.toPeerId}`}>
+                <title>{graphLinkTitle(link, nodeByPeerId, t)}</title>
+                <line className={`graph-edge ${graphLinkClass(link)}`} x1={from.x} y1={from.y} x2={to.x} y2={to.y} />
+                {label && <text className="graph-edge-label" x={(from.x + to.x) / 2} y={(from.y + to.y) / 2}>{label}</text>}
               </g>;
             })}
             {nodes.map((node) => {
@@ -172,6 +175,7 @@ function ConnectionGraph({ topology, nodeByPeerId, t }: { topology?: TopologySna
         <div className="chart-legend">
           <span><i className="legend-swatch bitmap" />{t('topology.source.conn_bitmap')}</span>
           <span><i className="legend-swatch peer-center" />{t('topology.source.peer_center')}</span>
+          <span><i className="legend-swatch hybrid" />{`${t('topology.source.conn_bitmap')} + ${t('topology.source.peer_center')}`}</span>
           <span><Badge variant="primary">{shortPeerId(EDGE_PEER_ID)}</Badge> edgetier-worker</span>
         </div>
       </div>
@@ -314,6 +318,27 @@ function graphPositions(peerIds: number[]): Map<number, { x: number; y: number }
 
 function sourceLabel(source: TopologyEdge['source'], t: Translator): string {
   return source === 'peer_center' ? t('topology.source.peer_center') : t('topology.source.conn_bitmap');
+}
+
+function sourceListLabel(sources: Array<TopologyEdge['source']>, t: Translator): string {
+  return sources.map((source) => sourceLabel(source, t)).join(' + ');
+}
+
+function graphLinkClass(link: TopologyGraphLink): string {
+  if (link.sources.includes('conn_bitmap') && link.sources.includes('peer_center')) return 'hybrid';
+  return link.sources.includes('peer_center') ? 'peer-center' : 'conn-bitmap';
+}
+
+function graphLinkLabel(link: TopologyGraphLink): string {
+  if (link.latencyMs !== undefined) return `${link.latencyMs} ms`;
+  return link.directedCount > 1 ? `x${link.directedCount}` : '';
+}
+
+function graphLinkTitle(link: TopologyGraphLink, nodeByPeerId: Map<number, RoutePeerSnapshot>, t: Translator): string {
+  const from = peerFullLabel(peerFor(link.fromPeerId, nodeByPeerId), t('common.unknownPeer'));
+  const to = peerFullLabel(peerFor(link.toPeerId, nodeByPeerId), t('common.unknownPeer'));
+  const latency = link.latencyMs === undefined ? t('common.notObserved') : `${link.latencyMs} ms`;
+  return `${from} <-> ${to}; ${sourceListLabel(link.sources, t)}; ${t('topology.directedEdges', { count: link.directedCount })}; ${latency}`;
 }
 
 function routeSourceLabel(source: RoutePathSnapshot['source'], t: Translator): string {

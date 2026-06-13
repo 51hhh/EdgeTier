@@ -284,6 +284,10 @@ body {
   background: var(--color-kumo-success, #11845b);
 }
 
+.legend-swatch.hybrid {
+  background: linear-gradient(135deg, var(--color-kumo-brand, #2563eb) 0 48%, var(--color-kumo-success, #11845b) 52% 100%);
+}
+
 .graph-toolbar {
   display: flex;
   justify-content: space-between;
@@ -305,6 +309,12 @@ body {
 .graph-edge.peer-center {
   stroke: var(--color-kumo-success, #11845b);
   stroke-dasharray: 6 6;
+}
+
+.graph-edge.hybrid {
+  stroke: var(--color-kumo-brand, #2563eb);
+  stroke-width: 3;
+  stroke-dasharray: 10 4 2 4;
 }
 
 .graph-edge-label,
