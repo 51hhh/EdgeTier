@@ -250,7 +250,7 @@ function ConnectionGraph({ topology, nodeByPeerId, t }: { topology?: TopologySna
                   node.virtualIpv4 ? `IP: ${node.virtualIpv4}` : null,
                   node.easytierVersion ? `Version: ${node.easytierVersion}` : null,
                   node.latencyMs !== undefined ? `Latency: ${node.latencyMs} ms` : null,
-                ].filter(Boolean).join('\n');
+                ].filter(Boolean).join(' | ');
                 return <g key={node.peerId} className="graph-node-group" transform={`translate(${pos.x} ${pos.y})`}>
                   <title>{tooltipLines}</title>
                   <circle className="graph-node" cx={0} cy={0} r={r} fill={nodeColor} stroke="var(--color-kumo-base)" strokeWidth={2.5} />
