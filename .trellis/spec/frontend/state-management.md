@@ -25,9 +25,11 @@ State variables in `App`:
 
 ```typescript
 const [rooms, setRooms] = useState<DirectoryRoomSummary[]>([]);
+const [defaultRoom, setDefaultRoom] = useState<DefaultRoomResponse | null>(null);
 const [selected, setSelected] = useState<string | null>(null);
 const [lookup, setLookup] = useState('');
 const [room, setRoom] = useState<RoomSnapshot | null>(null);
+const [outboundTcp, setOutboundTcp] = useState<OutboundTcpStatus | null>(null);
 const [error, setError] = useState<string | null>(null);
 const [lookupError, setLookupError] = useState<string | null>(null);
 const [lastRefreshed, setLastRefreshed] = useState<string | null>(null);
@@ -36,8 +38,9 @@ const [lastRefreshed, setLastRefreshed] = useState<string | null>(null);
 Polling interval and API calls:
 
 ```typescript
+getDefaultRoom();
 setInterval(tick, 5000);
-Promise.all([getRoom(roomId), getRoomEvents(roomId), getRoomTraffic(roomId)]);
+Promise.all([getRoom(roomId), getRoomEvents(roomId), getRoomTraffic(roomId), getRoomTopology(roomId), getOutboundTcpStatus(roomId)]);
 ```
 
 Selection/lookup helpers:
@@ -50,10 +53,12 @@ submitLookup(event: FormEvent<HTMLFormElement>): void
 ### 3. Contracts
 
 - `rooms` is the latest successful `/api/rooms` response.
+- `defaultRoom` is the safe, secret-free `/api/default-room` response used to select the configured room on first dashboard load.
 - `selected` is local UI state for the room id to inspect; `null` means no room is selected.
 - `lookup` is the manual room lookup input value.
 - `lookupError` is client-side validation feedback for manual lookup.
 - `room` is the merged result of `/api/rooms/:roomId`, `/api/rooms/:roomId/events`, and `/api/rooms/:roomId/traffic`, or `null` while unavailable.
+- `outboundTcp` is the latest room-scoped outbound TCP status. Polling it is read-only from the dashboard perspective, but it reaches the room Durable Object and may trigger configured TCP dialing.
 - `error` is display-only and cleared after a successful poll.
 - Poll failures must not clear previous successful `rooms` or `room` state.
 - Polling must be cleaned up in the `useEffect` cleanup function.
@@ -66,6 +71,7 @@ submitLookup(event: FormEvent<HTMLFormElement>): void
 |---|---|
 | Poll succeeds with no selected room | Update `rooms`, leave `room` unchanged/null, clear `error`, update `lastRefreshed` |
 | Poll succeeds with selected room | Update `rooms`, merge room snapshot/events/traffic, clear `error`, update `lastRefreshed` |
+| Default room load succeeds and no room is selected | Set `selected` and `lookup` to the default `roomId` |
 | Poll fails | Keep previous data, set `error` message |
 | Lookup room name invalid | Set `lookupError`, do not change `selected` |
 | Lookup room name valid | Set `selected`, copy room id into `lookup`, clear `lookupError` |

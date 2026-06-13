@@ -9,7 +9,7 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    if (url.pathname === '/login') return loginPage(env, url);
+    if (url.pathname === '/login') return loginPage(env, url, request.headers.get('Accept-Language') ?? '');
     if (url.pathname === '/api/auth/login') return handleLogin(request, env);
     if (url.pathname === '/api/auth/logout') return handleLogout();
     if (url.pathname === '/') return Response.redirect(`${url.origin}/dashboard/`, 302);
@@ -74,16 +74,51 @@ function unauthorizedResponse(request: Request, url: URL): Response {
   return json({ error: 'authentication required' }, 401);
 }
 
-function loginPage(env: Env, url: URL): Response {
+type LoginLocale = 'en' | 'zh';
+
+const LOGIN_TEXT: Record<LoginLocale, Record<string, string>> = {
+  en: {
+    title: 'EdgeTier Login',
+    eyebrow: 'Private EdgeTier deployment',
+    heading: 'Sign in',
+    intro: 'Use the administrator credentials configured with Wrangler secrets.',
+    warning: 'Authentication secrets are not configured. Add ADMIN_USERNAME, ADMIN_PASSWORD, SESSION_SECRET, and RELAY_TOKEN_SECRET before deployment.',
+    username: 'Username',
+    password: 'Password',
+    submit: 'Sign in',
+    badCredentials: 'Invalid username or password.',
+    failed: 'Sign in failed.',
+  },
+  zh: {
+    title: 'EdgeTier 登录',
+    eyebrow: '私有 EdgeTier 部署',
+    heading: '登录',
+    intro: '使用 Wrangler secrets 中配置的管理员凭据。',
+    warning: '认证 secrets 尚未配置。部署前请添加 ADMIN_USERNAME、ADMIN_PASSWORD、SESSION_SECRET 和 RELAY_TOKEN_SECRET。',
+    username: '用户名',
+    password: '密码',
+    submit: '登录',
+    badCredentials: '用户名或密码无效。',
+    failed: '登录失败。',
+  },
+};
+
+function loginLocale(acceptLanguage: string): LoginLocale {
+  return acceptLanguage.toLowerCase().includes('zh') ? 'zh' : 'en';
+}
+
+function loginPage(env: Env, url: URL, acceptLanguage: string): Response {
   const configured = authConfigured(env);
   const rawNext = url.searchParams.get('next');
   const next = rawNext && /^\/[A-Za-z0-9/_.\-]*$/.test(rawNext) && !rawNext.startsWith('//') ? rawNext : '/dashboard/';
+  const locale = loginLocale(acceptLanguage);
+  const text = LOGIN_TEXT[locale];
   return new Response(`<!doctype html>
-<html lang="en">
+<html lang="${locale}">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>EdgeTier Login</title>
+  <title>${text.title}</title>
   <style>
     :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
     body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #07111f; color: #f8fafc; }
@@ -101,14 +136,14 @@ function loginPage(env: Env, url: URL): Response {
 </head>
 <body>
   <main>
-    <p>Private EdgeTier deployment</p>
-    <h1>Sign in</h1>
-    <p>Use the administrator credentials configured with Wrangler secrets.</p>
-    ${configured ? '' : '<p class="warning">Authentication secrets are not configured. Add ADMIN_USERNAME, ADMIN_PASSWORD, SESSION_SECRET, and RELAY_TOKEN_SECRET before deployment.</p>'}
+    <p>${text.eyebrow}</p>
+    <h1>${text.heading}</h1>
+    <p>${text.intro}</p>
+    ${configured ? '' : `<p class="warning">${text.warning}</p>`}
     <form id="login-form">
-      <label>Username <input name="username" autocomplete="username" required /></label>
-      <label>Password <input name="password" type="password" autocomplete="current-password" required /></label>
-      <button type="submit" ${configured ? '' : 'disabled'}>Sign in</button>
+      <label>${text.username} <input name="username" autocomplete="username" required /></label>
+      <label>${text.password} <input name="password" type="password" autocomplete="current-password" required /></label>
+      <button type="submit" ${configured ? '' : 'disabled'}>${text.submit}</button>
       <div class="error" id="login-error" role="alert"></div>
     </form>
   </main>
@@ -121,7 +156,7 @@ function loginPage(env: Env, url: URL): Response {
       const data = new FormData(form);
       const response = await fetch('/api/auth/login', { method: 'POST', body: data });
       if (response.ok) window.location.href = ${JSON.stringify(next)};
-      else error.textContent = response.status === 401 ? 'Invalid username or password.' : 'Sign in failed.';
+      else error.textContent = response.status === 401 ? ${JSON.stringify(text.badCredentials)} : ${JSON.stringify(text.failed)};
     });
   </script>
 </body>

@@ -54,6 +54,7 @@ Public Worker routes:
 ```text
 GET /ws?room=<room>                         # WebSocket upgrade only
 GET /api/health                             # service health JSON
+GET /api/default-room                       # env-derived default room/network name without secrets
 GET /api/rooms                              # directory summary list
 GET /api/rooms/:roomId                      # full room snapshot
 GET /api/rooms/:roomId/peers                # peer list
@@ -140,6 +141,17 @@ interface EasyTierPacketHeader {
 ```
 
 Observer payloads are defined in `src/observer/types.ts` and must remain the shared contract between Worker APIs and dashboard code.
+
+Default room selection is read-only and secret-free:
+
+```typescript
+interface DefaultRoomResponse {
+  roomId: string;
+  networkName: string;
+}
+```
+
+It is derived from `EASYTIER_NETWORKS` first, then valid `EASYTIER_NETWORK_NAME`, then `default`. The dashboard uses it to open a room on first load so room-scoped outbound TCP configuration can dial without a manual room lookup.
 
 ### 4. Validation & Error Matrix
 

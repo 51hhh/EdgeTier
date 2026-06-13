@@ -75,6 +75,11 @@ export interface RelayTokenResponse {
   uriPath: string;
 }
 
+export interface DefaultRoomResponse {
+  roomId: string;
+  networkName: string;
+}
+
 export interface OutboundTcpPeerStatus {
   uri: string;
   configured: boolean;

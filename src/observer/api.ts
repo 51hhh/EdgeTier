@@ -1,4 +1,5 @@
 import { ROOM_NAME_PATTERN } from '../easytier/constants';
+import { resolveDefaultRoomConfig } from '../durable-objects/relay-room';
 import { issueRelayToken, type VerifiedSession } from '../worker/auth';
 import type { Env } from '../worker/env';
 
@@ -19,6 +20,7 @@ export async function handleApi(request: Request, env: Env, session: VerifiedSes
   const url = new URL(request.url);
   if (url.pathname === '/api/health') return json({ ok: true, service: 'edgetier', version: '0.1.1', capabilities: ['wss-relay', 'easytier-outbound-tcp', 'easytier-handshake', 'easytier-rpc-decode', 'easytier-peer-center', 'topology-api', 'observer-api', 'dashboard', 'private-auth'] });
   if (url.pathname === '/api/auth/me') return json({ authenticated: true, user: { username: session.username }, expiresAt: session.expiresAt });
+  if (url.pathname === '/api/default-room') return json(resolveDefaultRoomConfig(env));
   if (url.pathname === '/api/rooms') return env.DIRECTORY.get(env.DIRECTORY.idFromName('global')).fetch('https://directory/');
   const match = /^\/api\/rooms\/([^/]+)(?:\/(peers|events|traffic|topology|outbound-tcp|token|test-seed))?$/.exec(url.pathname);
   if (!match) return null;

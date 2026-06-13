@@ -41,6 +41,7 @@ src/
 Dashboard API functions:
 
 ```typescript
+getDefaultRoom(): Promise<DefaultRoomResponse>
 getRooms(): Promise<DirectoryRoomSummary[]>
 getRoom(roomId: string): Promise<RoomSnapshot>
 ```
@@ -50,6 +51,7 @@ API endpoints consumed:
 ```text
 GET /api/rooms
 GET /api/rooms/:roomId
+GET /api/default-room
 ```
 
 ### 3. Contracts
@@ -78,6 +80,8 @@ interface RoomSnapshot {
 ```
 
 Polling is acceptable for v0.1. Real-time dashboard WebSocket is not required.
+
+The dashboard should load `GET /api/default-room` on first mount, select that room when no manual selection exists, and then poll room-specific APIs. This is what triggers configured Worker outbound TCP dialing through the room Durable Object when the private dashboard is opened.
 
 ### 4. Validation & Error Matrix
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { EDGE_PEER_ID } from '../easytier/constants';
-import { buildRouteConnBitmapForUpdate, buildTopologySummary, framePeerBindingCandidate, resolveNetworkConfig, resolveOutboundTcpPeers, toArrayBuffer } from './relay-room';
+import { buildRouteConnBitmapForUpdate, buildTopologySummary, framePeerBindingCandidate, resolveDefaultRoomConfig, resolveNetworkConfig, resolveOutboundTcpPeers, toArrayBuffer } from './relay-room';
 
 function bitmapHas(bitmap: Uint8Array, size: number, row: number, col: number): boolean {
   const bitIndex = row * size + col;
@@ -70,6 +70,33 @@ describe('resolveNetworkConfig', () => {
       EASYTIER_NETWORK_SECRET: 'global-secret',
       EASYTIER_NETWORK_SECRETS: JSON.stringify({ 'global-mesh': 'mapped-global-secret' }),
     }, 'room-b')).toEqual({ networkName: 'global-mesh', secret: 'mapped-global-secret' });
+  });
+});
+
+describe('resolveDefaultRoomConfig', () => {
+  it('uses the first valid EASYTIER_NETWORKS room without exposing secrets', () => {
+    expect(resolveDefaultRoomConfig({
+      EASYTIER_NETWORK_NAME: 'global-mesh',
+      EASYTIER_NETWORK_SECRET: 'global-secret',
+      EASYTIER_NETWORKS: JSON.stringify({
+        '../unsafe': { networkName: 'unsafe-mesh', secret: 'unsafe-secret' },
+        home: { networkName: 'home-mesh', secret: 'home-secret' },
+      }),
+    })).toEqual({ roomId: 'home', networkName: 'home-mesh' });
+  });
+
+  it('falls back to EASYTIER_NETWORK_NAME as the default room id', () => {
+    expect(resolveDefaultRoomConfig({
+      EASYTIER_NETWORK_NAME: 'home-mesh',
+      EASYTIER_NETWORK_SECRET: 'global-secret',
+    })).toEqual({ roomId: 'home-mesh', networkName: 'home-mesh' });
+  });
+
+  it('uses default when no valid configured room exists', () => {
+    expect(resolveDefaultRoomConfig({
+      EASYTIER_NETWORK_NAME: '../unsafe',
+      EASYTIER_NETWORKS: JSON.stringify({ '../unsafe': 'secret' }),
+    })).toEqual({ roomId: 'default', networkName: 'default' });
   });
 });
 

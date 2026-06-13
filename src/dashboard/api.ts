@@ -1,4 +1,8 @@
-import type { DirectoryRoomSummary, OutboundTcpStatus, RelayEvent, RelayTokenResponse, RoomSnapshot, TopologySnapshot, TrafficSnapshot } from '../observer/types';
+import type { DefaultRoomResponse, DirectoryRoomSummary, OutboundTcpStatus, RelayEvent, RelayTokenResponse, RoomSnapshot, TopologySnapshot, TrafficSnapshot } from '../observer/types';
+
+export async function getDefaultRoom(): Promise<DefaultRoomResponse> {
+  return fetchJson<DefaultRoomResponse>('/api/default-room');
+}
 
 export async function getRooms(): Promise<DirectoryRoomSummary[]> {
   const data = await fetchJson<{ rooms: DirectoryRoomSummary[] }>('/api/rooms');

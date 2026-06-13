@@ -1,4 +1,4 @@
-import { EASYTIER_HEADER_SIZE, EASYTIER_MAGIC, EASYTIER_VERSION, EDGE_PEER_ID, EasyTierPacketType, MAX_FRAME_SIZE, MAX_INVALID_PACKETS_PER_SESSION, MAX_PEERS_PER_ROOM, RECENT_EVENTS_LIMIT } from '../easytier/constants';
+import { EASYTIER_HEADER_SIZE, EASYTIER_MAGIC, EASYTIER_VERSION, EDGE_PEER_ID, EasyTierPacketType, MAX_FRAME_SIZE, MAX_INVALID_PACKETS_PER_SESSION, MAX_PEERS_PER_ROOM, RECENT_EVENTS_LIMIT, ROOM_NAME_PATTERN } from '../easytier/constants';
 import { AEAD_TAIL_SIZE, decryptAesGcm, deriveKeys, encryptAesGcm, type DerivedKeys } from '../easytier/crypto';
 import { buildHandshakeRequest, buildHandshakeResponse, decodeHandshake, encodeHandshake } from '../easytier/handshake';
 import { createEasyTierFrame, parseEasyTierHeader, payloadLengthMatches, splitEasyTierFrames, type EasyTierPacketHeader } from '../easytier/packet';
@@ -52,6 +52,11 @@ type Session = PeerSnapshot & {
 export interface NetworkConfig {
   networkName: string;
   secret?: string;
+}
+
+export interface DefaultRoomConfig {
+  roomId: string;
+  networkName: string;
 }
 
 interface PersistedPeerCenterEntry {
@@ -894,12 +899,14 @@ export class RelayRoom implements DurableObject {
       ...peer
     }) => peer);
     const livePeerIds = new Set(livePeers.map((peer) => peer.peerId).filter((peerId): peerId is number => peerId !== undefined));
+    const peerCenterLastSeen = this.peerCenterLastSeen();
     const routeOnlyPeers: PeerSnapshot[] = [...this.routePeers.values()]
       .filter((peer) => !livePeerIds.has(peer.peerId))
       .map((peer) => ({
         sessionId: `route-${peer.peerId}`,
         roomId,
         peerId: peer.peerId,
+        networkName: this.expectedNetworkName(roomId),
         hostname: peer.hostname,
         virtualIpv4: peer.virtualIpv4,
         virtualIpv6: peer.virtualIpv6,
@@ -914,6 +921,23 @@ export class RelayRoom implements DurableObject {
         connected: false,
         connectedAt: peer.lastSeen,
         lastSeen: peer.lastSeen,
+        rxBytes: 0,
+        txBytes: 0,
+        rxPackets: 0,
+        txPackets: 0,
+      }));
+    const peerCenterOnlyPeers: PeerSnapshot[] = [...peerCenterLastSeen.entries()]
+      .filter(([peerId]) => peerId !== EDGE_PEER_ID && !livePeerIds.has(peerId) && !this.routePeers.has(peerId))
+      .sort(([left], [right]) => left - right)
+      .map(([peerId, lastSeen]) => ({
+        sessionId: `peer-center-${peerId}`,
+        roomId,
+        peerId,
+        networkName: this.expectedNetworkName(roomId),
+        proxyCidrs: [],
+        connected: false,
+        connectedAt: lastSeen,
+        lastSeen,
         rxBytes: 0,
         txBytes: 0,
         rxPackets: 0,
@@ -939,11 +963,12 @@ export class RelayRoom implements DurableObject {
       rxPackets: 0,
       txPackets: 0,
     }] : [];
-    const peers = [...edgePeer, ...livePeers, ...routeOnlyPeers, ...this.seededPeers];
+    const peers = [...edgePeer, ...livePeers, ...routeOnlyPeers, ...peerCenterOnlyPeers, ...this.seededPeers];
     const peerIds = new Set<number>();
     if (includeEdgePeer) peerIds.add(EDGE_PEER_ID);
     for (const peerId of this.peers.keys()) peerIds.add(peerId);
     for (const peerId of this.routePeers.keys()) peerIds.add(peerId);
+    for (const peerId of peerCenterLastSeen.keys()) peerIds.add(peerId);
     const peerCount = peerIds.size + this.seededPeers.length;
     const websocketCount = [...this.sessions.values()].filter((session) => session.transportKind === 'websocket').length + this.seededPeers.length;
     return { roomId, peerCount, websocketCount, bytes: this.traffic.rxBytes + this.traffic.txBytes, lastActivity, traffic: this.traffic, peers, recentEvents: this.events.slice(-50), topology: this.snapshotTopology(roomId) };
@@ -985,6 +1010,17 @@ export class RelayRoom implements DurableObject {
 
   private hasObservedNetworkState(): boolean {
     return this.sessions.size > 0 || this.routePeers.size > 0 || this.peerCenter.size > 0;
+  }
+
+  private peerCenterLastSeen(): Map<number, string> {
+    const out = new Map<number, string>();
+    for (const [peerId, info] of this.peerCenter.entries()) {
+      out.set(peerId, info.lastSeen);
+      for (const toPeerId of info.directPeers.keys()) {
+        if (!out.has(toPeerId)) out.set(toPeerId, info.lastSeen);
+      }
+    }
+    return out;
   }
 
   private networkConfigFor(roomId: string): NetworkConfig {
@@ -1462,6 +1498,18 @@ export function resolveNetworkConfig(env: Pick<Env, 'EASYTIER_NETWORK_NAME' | 'E
     networkName,
     secret: mappedSecrets.get(roomId) ?? mappedSecrets.get(networkName) ?? env.EASYTIER_NETWORK_SECRET,
   };
+}
+
+export function resolveDefaultRoomConfig(env: Pick<Env, 'EASYTIER_NETWORK_NAME' | 'EASYTIER_NETWORK_SECRET' | 'EASYTIER_NETWORK_SECRETS' | 'EASYTIER_NETWORKS'>): DefaultRoomConfig {
+  const networkConfigs = parseNetworkConfigMap(env.EASYTIER_NETWORKS);
+  for (const [roomId, config] of networkConfigs.entries()) {
+    if (ROOM_NAME_PATTERN.test(roomId)) return { roomId, networkName: config.networkName };
+  }
+
+  const fallbackRoomId = env.EASYTIER_NETWORK_NAME && ROOM_NAME_PATTERN.test(env.EASYTIER_NETWORK_NAME)
+    ? env.EASYTIER_NETWORK_NAME
+    : 'default';
+  return { roomId: fallbackRoomId, networkName: fallbackRoomId };
 }
 
 function parseNetworkConfigMap(raw: string | undefined): Map<string, NetworkConfig> {
