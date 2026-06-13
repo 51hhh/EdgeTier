@@ -249,3 +249,40 @@ Updated conclusion:
 
 - Cloudflare Worker can now join the EasyTier control plane by actively dialing a normal `tcp://` EasyTier peer.
 - Cloudflare Worker still cannot dial `udp://`, perform TCP/UDP hole punching, run TUN, or carry L3 data plane traffic.
+
+## UI Optimization Redeploy Smoke Check
+
+Deployment version validated:
+
+- `1f222bd7-bc86-4781-8983-aa3d3d79fde0`: redeployed from clean `master` at commit `c9c814b`.
+
+Local/deploy gate:
+
+- `npx vite build && npx wrangler deploy`: passed; three updated dashboard assets uploaded.
+- `npm run typecheck`: passed.
+- `npm test`: passed, 90 tests.
+- `npm run build`: passed; Vite chunk-size warning only, Wrangler dry-run passed.
+- `npm run proto:check`: passed.
+
+Online route checks:
+
+- `POST /api/auth/login`: `200`
+- `GET /api/health`: `200`, capabilities included `easytier-outbound-tcp`, `topology-api`, `observer-api`, and `dashboard`.
+- `GET /dashboard/`: `200`
+- `GET /api/default-room`: `200`, default room/network `home-mesh`.
+- `GET /api/rooms/home-mesh/outbound-tcp`: `200`
+- `POST /api/rooms/home-mesh/outbound-tcp`: `200`
+- `GET /api/rooms/home-mesh`: `200`
+- `GET /api/rooms/home-mesh/topology`: `200`
+
+Real `home-mesh` smoke window:
+
+- Outbound TCP reported one configured peer with `connected=true` and `handshakeAccepted=true`.
+- `/api/rooms/home-mesh` reported `peerCount=4`, `websocketCount=0`, and 50 recent events retained.
+- `/api/rooms/home-mesh/topology` reported 4 nodes / 14 edges / 3 routes.
+- Decoded hostnames included `edgetier-worker`, `home-kwrt`, `rick-MRGF-XX`, and `Xiaomi K80`.
+
+Security notes:
+
+- Admin credentials, relay tokens, and EasyTier secrets were read only from gitignored local env files.
+- Validation output recorded only status codes and aggregate topology fields; no secret values or full tokens were printed or committed.
