@@ -304,13 +304,13 @@ body {
   stroke: var(--color-kumo-default);
   stroke-linecap: round;
   stroke-width: 2;
-  opacity: 0.4;
+  opacity: 0.5;
   vector-effect: non-scaling-stroke;
   transition: opacity 160ms ease, stroke-width 160ms ease;
 }
 
 .graph-edge:hover {
-  opacity: 0.8;
+  opacity: 0.9;
   stroke-width: 3;
 }
 

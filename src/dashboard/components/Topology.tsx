@@ -4,7 +4,7 @@ import type { ConnectionMatrixSnapshot, RoutePathSnapshot, RoutePeerSnapshot, To
 import { EDGE_PEER_ID } from '../../easytier/constants';
 import { formatPercent } from '../format';
 import type { Translator } from '../i18n';
-import { nodeColorForPeerId, natStyleFor } from '../nat-styles';
+import { nodeColorForPeerId } from '../nat-styles';
 import { compactPeerDisplayName, peerDisplayName, peerFullLabel, shortPeerId } from '../peer-display';
 import { buildTopologyGraphLinks, computeEdgeLabelPositions, computeTopologyGraphLayout, detectEdgeCrossings, topologyGraphPeerIds, type TopologyGraphLink, type TopologyGraphPosition } from '../topology-display';
 
@@ -233,14 +233,12 @@ function ConnectionGraph({ topology, nodeByPeerId, t }: { topology?: TopologySna
                 if (!pos) return null;
                 const node = peerFor(peerId, nodeByPeerId);
                 const nodeColor = nodeColorForPeerId(node.peerId);
-                const natStyle = natStyleFor(node.udpNatType, node.tcpNatType);
                 const r = nodeRadius(pos);
                 return <g key={node.peerId} className="graph-node-group" transform={`translate(${pos.x} ${pos.y})`}>
-                  <title>{peerFullLabel(node, t('common.unknownPeer')) + (node.udpNatType ? ` | NAT: ${node.udpNatType}` : '')}</title>
-                  {renderNodeShape(natStyle.shape, r, nodeColor)}
+                  <title>{peerFullLabel(node, t('common.unknownPeer'))}</title>
+                  <circle className="graph-node" cx={0} cy={0} r={r} fill={nodeColor} stroke="var(--color-kumo-base)" strokeWidth={2.5} />
                   <text className="graph-node-label" x={0} y={4}>{shortPeerId(node.peerId)}</text>
                   <text className="graph-node-host-label" x={0} y={r + 16}>{compactPeerDisplayName(node, t('common.routeDataPending'))}</text>
-                  <text className="graph-node-nat-icon" x={r - 6} y={-r + 8}>{natStyle.icon}</text>
                 </g>;
               })}
             </g>
@@ -480,31 +478,3 @@ function routeSourceLabel(source: RoutePathSnapshot['source'], t: Translator): s
   return t('topology.source.conn_bitmap');
 }
 
-function renderNodeShape(shape: 'circle' | 'square' | 'diamond' | 'hexagon', radius: number, fillColor: string): React.ReactNode {
-  const strokeColor = 'var(--color-kumo-base)';
-  const strokeWidth = 2.5;
-
-  switch (shape) {
-    case 'circle':
-      return <circle className="graph-node" cx={0} cy={0} r={radius} fill={fillColor} stroke={strokeColor} strokeWidth={strokeWidth} />;
-
-    case 'square': {
-      const size = radius * 1.6;
-      const offset = size / 2;
-      return <rect className="graph-node" x={-offset} y={-offset} width={size} height={size} rx={3} fill={fillColor} stroke={strokeColor} strokeWidth={strokeWidth} />;
-    }
-
-    case 'diamond': {
-      const size = radius * 1.8;
-      const points = `0,${-size} ${size},0 0,${size} ${-size},0`;
-      return <polygon className="graph-node" points={points} fill={fillColor} stroke={strokeColor} strokeWidth={strokeWidth} />;
-    }
-
-    case 'hexagon': {
-      const size = radius;
-      const h = size * Math.sqrt(3) / 2;
-      const points = `${size},0 ${size/2},${h} ${-size/2},${h} ${-size},0 ${-size/2},${-h} ${size/2},${-h}`;
-      return <polygon className="graph-node" points={points} fill={fillColor} stroke={strokeColor} strokeWidth={strokeWidth} />;
-    }
-  }
-}
