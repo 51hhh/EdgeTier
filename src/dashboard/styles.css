@@ -179,7 +179,7 @@ body {
 
 .graph-controls {
   position: absolute;
-  top: 12px;
+  bottom: 12px;
   right: 12px;
   display: flex;
   flex-direction: column;
@@ -188,6 +188,7 @@ body {
   border: 1px solid var(--color-kumo-hairline);
   border-radius: 8px;
   padding: 6px;
+  z-index: 10;
 }
 
 .graph-controls button {

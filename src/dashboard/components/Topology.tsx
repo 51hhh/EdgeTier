@@ -151,6 +151,7 @@ function ConnectionGraph({ topology, nodeByPeerId, t }: { topology?: TopologySna
 
   const handleWheel = (e: React.WheelEvent<SVGSVGElement>) => {
     e.preventDefault();
+    e.stopPropagation();
     const delta = e.deltaY > 0 ? 0.9 : 1.1;
     const newScale = Math.max(0.5, Math.min(3, transform.scale * delta));
     setTransform(prev => ({ ...prev, scale: newScale }));
@@ -235,7 +236,12 @@ function ConnectionGraph({ topology, nodeByPeerId, t }: { topology?: TopologySna
                 const nodeColor = nodeColorForPeerId(node.peerId);
                 const r = nodeRadius(pos);
                 return <g key={node.peerId} className="graph-node-group" transform={`translate(${pos.x} ${pos.y})`}>
-                  <title>{peerFullLabel(node, t('common.unknownPeer'))}</title>
+                  <title>{peerFullLabel(node, t('common.unknownPeer'))}
+{node.udpNatType ? `UDP NAT: ${node.udpNatType}` : ''}
+{node.tcpNatType ? `TCP NAT: ${node.tcpNatType}` : ''}
+{node.virtualIpv4 ? `IP: ${node.virtualIpv4}` : ''}
+{node.easytierVersion ? `Version: ${node.easytierVersion}` : ''}
+{node.latencyMs !== undefined ? `Latency: ${node.latencyMs} ms` : ''}</title>
                   <circle className="graph-node" cx={0} cy={0} r={r} fill={nodeColor} stroke="var(--color-kumo-base)" strokeWidth={2.5} />
                   <text className="graph-node-label" x={0} y={4}>{shortPeerId(node.peerId)}</text>
                   <text className="graph-node-host-label" x={0} y={r + 16}>{compactPeerDisplayName(node, t('common.routeDataPending'))}</text>
