@@ -48,6 +48,8 @@ import { Badge, Button, Empty, Input, LayerCard, Table, Text, cn } from '@cloudf
 - Manual room lookup is allowed, but it only fetches observer state; it must not create or configure EasyTier nodes.
 - Unknown peer IDs display as `unknown`.
 - Peer identifiers in dense tables, topology graphs, and matrix headers should use a short badge plus a hostname/subtitle when available, with the full peer id retained in `title`/detail text.
+- Topology graph layout should be derived from observed links and node degree. Do not pin `edgetier-worker`, `EDGE_PEER_ID`, or any other peer as a fixed center; the graph should represent the decoded EasyTier topology, not EdgeTier's observer viewpoint.
+- Topology graph edges must come from observed topology data only. Isolated nodes may render as nodes, but no synthetic edge should be drawn just to connect them to a center.
 - Missing last activity displays as `none`.
 - Status text should be short and badge-friendly.
 - Do not display full network secret digests.
@@ -79,6 +81,7 @@ import { Badge, Button, Empty, Input, LayerCard, Table, Text, cn } from '@cloudf
 - Good: use `<Table>` for Rooms, Peers, and Events with safe fallback text.
 - Good: use `<Badge>` for room id, active/stale state, peer status, and event type.
 - Good: use the shared peer display helper so Devices, Topology, route paths, and bitmap matrices all show peer ids/hostnames consistently.
+- Good: use a force-directed or similarly data-derived topology graph where node position responds to observed links and connection count.
 - Good: use `<Button type="button">` inside table cells for room selection so keyboard focus and activation work.
 - Good: use `<LayerCard>` for dashboard panels and metrics.
 - Good: use `<Empty>` for no rooms/no peers/no events states.
@@ -86,6 +89,7 @@ import { Badge, Button, Empty, Input, LayerCard, Table, Text, cn } from '@cloudf
 - Bad: using raw `<table>` with divergent styling when Kumo `Table` is available.
 - Bad: using clickable `<tr onClick={...}>` for selection; table rows are not keyboard buttons.
 - Bad: adding mutation buttons such as restart/configure/delete peer; EdgeTier v0.1.x is observer-only.
+- Bad: making `edgetier-worker` the visual center of the graph or drawing star edges from EdgeTier to every peer when the API did not observe those links.
 
 ### 6. Tests Required
 
@@ -185,3 +189,13 @@ Required accessibility patterns:
 **Fix**: Put a Kumo `Button` or real `<button>` inside a table cell.
 
 **Prevention**: Any interactive dashboard control must be keyboard-focusable by default.
+
+### Common Mistake: Centering the topology graph on EdgeTier
+
+**Symptom**: The topology graph looks like all peers connect through `edgetier-worker`, even when EasyTier reports P2P or peer-to-peer adjacency between non-Worker nodes.
+
+**Cause**: Using the observer node as a fixed center or synthesizing visual edges for layout convenience.
+
+**Fix**: Compute graph layout from `TopologySnapshot.edges` and node degree. Render only observed links; leave isolated nodes unconnected.
+
+**Prevention**: Treat the graph as a decoded EasyTier relationship view. EdgeTier can appear as a normal node, but it must not be pinned or visually privileged unless the protocol data itself makes it central.

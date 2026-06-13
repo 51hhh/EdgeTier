@@ -336,3 +336,52 @@ Security notes:
 
 - The EasyTier network secret and public peer URIs were read from gitignored local env files and written only to the remote root-owned EasyTier config.
 - Validation output and this report omit secret values, relay tokens, and unredacted config contents.
+
+## Force Graph Correction And `toe2` Generic Config
+
+Deployment version validated:
+
+- `88d9a090-8fee-4a7d-911f-c83856d356ae`: force-directed topology graph deployed to Cloudflare.
+
+Local/deploy gate:
+
+- `npm run typecheck`: passed.
+- `npm test`: passed, 93 tests.
+- `npm run proto:check`: passed.
+- `npm run build`: passed; Vite chunk-size warning only, Wrangler dry-run passed.
+- `npx wrangler deploy`: passed.
+
+Dashboard/UI correction:
+
+- Replaced the fixed center/ring graph with a force-directed layout.
+- No peer, including `edgetier-worker`, is pinned or privileged as the graph center.
+- Node placement is derived from observed graph links and node degree; higher-degree peers naturally settle closer to the center.
+- The graph renders only observed links between peers. If a node has no observed link, no synthetic edge is drawn.
+- Topology updates animate node movement, and newly observed nodes enter from their connected neighbor area before settling into the computed layout.
+
+`toe2` correction:
+
+- The remote service now uses the downloaded config `/home/rick/下载/easytier-home-mesh-generic.toml`, copied to `/etc/easytier/easytier-home-mesh-generic.toml` with root ownership and mode `600`.
+- The systemd unit `easytier-home-mesh.service` now runs `/usr/local/bin/easytier-core -c /etc/easytier/easytier-home-mesh-generic.toml`.
+- The service is `enabled` and `active`.
+- The copied config has no EdgeTier/WSS/Worker peer references; it connects through the configured public home EasyTier peers.
+- Runtime evidence: `tun0` received `10.144.1.5/24`; logs showed TCP/UDP connections to the home public peer and an additional UDP peer connection.
+
+Online route checks:
+
+- `POST /api/auth/login`: `200`
+- `GET /api/health` with session cookie: `200`
+- `GET /dashboard/`: `200`
+- `GET /api/rooms/home-mesh/topology`: `200`
+
+Real `home-mesh` smoke window:
+
+- `/api/rooms/home-mesh/topology` reported 5 nodes / 23 directed edges / 4 reachable routes.
+- The current graph displays those directed records as 6 observed peer-pair links.
+- Decoded hostnames included `edgetier-worker`, `home-kwrt`, `rick-MRGF-XX`, `Xiaomi K80`, and `toe2-ubuntu24`.
+- Current `toe2-ubuntu24` peer id is `2357229370` with virtual IPv4 `10.144.1.5/24`.
+
+Security notes:
+
+- The downloaded EasyTier config contains the network secret and was copied only to the remote root-owned config path.
+- Validation output and this report omit secret values, relay tokens, and unredacted peer URIs.

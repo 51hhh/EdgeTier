@@ -300,6 +300,7 @@ body {
   stroke-width: 2;
   opacity: 0.75;
   vector-effect: non-scaling-stroke;
+  transition: opacity 160ms ease, stroke-width 160ms ease;
 }
 
 .graph-edge.conn-bitmap {
@@ -334,14 +335,15 @@ body {
   font-size: 11px;
 }
 
+.graph-node-group {
+  opacity: 1;
+}
+
 .graph-node {
   fill: var(--color-kumo-recessed);
   stroke: var(--color-kumo-brand, #2563eb);
   stroke-width: 2;
-}
-
-.graph-node.edge {
-  fill: var(--color-kumo-brand, #2563eb);
+  vector-effect: non-scaling-stroke;
 }
 
 .matrix-scroll {

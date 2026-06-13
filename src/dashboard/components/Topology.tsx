@@ -1,11 +1,11 @@
-import React from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Badge, Empty, LayerCard, Table, Text } from '@cloudflare/kumo';
 import type { ConnectionMatrixSnapshot, RoutePathSnapshot, RoutePeerSnapshot, TopologyEdge, TopologySnapshot } from '../../observer/types';
 import { EDGE_PEER_ID } from '../../easytier/constants';
 import { formatPercent } from '../format';
 import type { Translator } from '../i18n';
 import { peerDisplayName, peerFullLabel, shortPeerId } from '../peer-display';
-import { buildTopologyGraphLinks, type TopologyGraphLink } from '../topology-display';
+import { buildTopologyGraphLinks, computeTopologyGraphLayout, type TopologyGraphLink, type TopologyGraphPosition } from '../topology-display';
 
 interface TopologyProps {
   topology?: TopologySnapshot | null;
@@ -131,14 +131,18 @@ function Metric({ label, value }: { label: string; value: React.ReactNode }) {
 function ConnectionGraph({ topology, nodeByPeerId, t }: { topology?: TopologySnapshot | null; nodeByPeerId: Map<number, RoutePeerSnapshot>; t: Translator }) {
   const nodes = topology?.nodes ?? [];
   const edges = topology?.edges ?? [];
-  if (nodes.length === 0 || edges.length === 0) {
+  const graphLinks = useMemo(() => buildTopologyGraphLinks(edges), [edges]);
+  const graphPeerIds = useMemo(() => nodes.map((node) => node.peerId), [nodes]);
+  const layoutSignature = useMemo(() => graphLayoutSignature(graphPeerIds, graphLinks), [graphPeerIds, graphLinks]);
+  const targetLayout = useMemo(() => computeTopologyGraphLayout(graphPeerIds, graphLinks, GRAPH_WIDTH, GRAPH_HEIGHT), [layoutSignature]);
+  const animatedLayout = useAnimatedGraphLayout(targetLayout, graphLinks);
+  const positions = useMemo(() => new Map(animatedLayout.map((position) => [position.peerId, position])), [animatedLayout]);
+  if (nodes.length === 0) {
     return <LayerCard>
       <LayerCard.Secondary>{t('topology.connectionGraph')}</LayerCard.Secondary>
       <LayerCard.Primary><Empty title={t('topology.noGraphTitle')} description={t('topology.noGraphDescription')} /></LayerCard.Primary>
     </LayerCard>;
   }
-  const positions = graphPositions(nodes.map((node) => node.peerId));
-  const graphLinks = buildTopologyGraphLinks(edges);
   return <LayerCard>
     <LayerCard.Secondary>{t('topology.connectionGraph')} {topology?.updatedAt ? <Badge variant="outline">{topology.updatedAt}</Badge> : null}</LayerCard.Secondary>
     <LayerCard.Primary>
@@ -163,11 +167,11 @@ function ConnectionGraph({ topology, nodeByPeerId, t }: { topology?: TopologySna
             {nodes.map((node) => {
               const pos = positions.get(node.peerId);
               if (!pos) return null;
-              return <g key={node.peerId}>
+              return <g key={node.peerId} className="graph-node-group" transform={`translate(${pos.x} ${pos.y})`}>
                 <title>{peerFullLabel(node, t('common.unknownPeer'))}</title>
-                <circle className={node.peerId === EDGE_PEER_ID ? 'graph-node edge' : 'graph-node'} cx={pos.x} cy={pos.y} r={node.peerId === EDGE_PEER_ID ? 22 : 18} />
-                <text className="graph-node-label" x={pos.x} y={pos.y + 4}>{shortPeerId(node.peerId)}</text>
-                <text className="graph-node-host-label" x={pos.x} y={pos.y + 38}>{peerDisplayName(node, t('common.routeDataPending'))}</text>
+                <circle className="graph-node" cx={0} cy={0} r={nodeRadius(pos)} />
+                <text className="graph-node-label" x={0} y={4}>{shortPeerId(node.peerId)}</text>
+                <text className="graph-node-host-label" x={0} y={nodeRadius(pos) + 16}>{peerDisplayName(node, t('common.routeDataPending'))}</text>
               </g>;
             })}
           </svg>
@@ -176,11 +180,70 @@ function ConnectionGraph({ topology, nodeByPeerId, t }: { topology?: TopologySna
           <span><i className="legend-swatch bitmap" />{t('topology.source.conn_bitmap')}</span>
           <span><i className="legend-swatch peer-center" />{t('topology.source.peer_center')}</span>
           <span><i className="legend-swatch hybrid" />{`${t('topology.source.conn_bitmap')} + ${t('topology.source.peer_center')}`}</span>
-          <span><Badge variant="primary">{shortPeerId(EDGE_PEER_ID)}</Badge> edgetier-worker</span>
         </div>
       </div>
     </LayerCard.Primary>
   </LayerCard>;
+}
+
+function useAnimatedGraphLayout(targetLayout: TopologyGraphPosition[], links: TopologyGraphLink[]): TopologyGraphPosition[] {
+  const [layout, setLayout] = useState<TopologyGraphPosition[]>(targetLayout);
+  const layoutRef = useRef<Map<number, TopologyGraphPosition>>(new Map(targetLayout.map((position) => [position.peerId, position])));
+  const animationSignature = useMemo(() => {
+    const nodeKey = targetLayout.map((position) => `${position.peerId}:${position.x}:${position.y}:${position.degree}`).join('|');
+    const linkKey = links.map((link) => `${link.fromPeerId}:${link.toPeerId}:${link.directedCount}`).join('|');
+    return `${nodeKey}#${linkKey}`;
+  }, [targetLayout, links]);
+
+  useEffect(() => {
+    const current = layoutRef.current;
+    if (targetLayout.length === 0 || current.size === 0 || typeof requestAnimationFrame === 'undefined') {
+      layoutRef.current = new Map(targetLayout.map((position) => [position.peerId, position]));
+      setLayout(targetLayout);
+      return;
+    }
+
+    const starts = new Map(targetLayout.map((target) => [target.peerId, current.get(target.peerId) ?? newNodeStartPosition(target, current, links)]));
+    const durationMs = 720;
+    let startTime = 0;
+    let frame = 0;
+
+    const step = (now: number) => {
+      if (!startTime) startTime = now;
+      const progress = Math.min(1, (now - startTime) / durationMs);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      const next = targetLayout.map((target) => {
+        const start = starts.get(target.peerId) ?? target;
+        return {
+          ...target,
+          x: Math.round(start.x + (target.x - start.x) * eased),
+          y: Math.round(start.y + (target.y - start.y) * eased),
+        };
+      });
+      layoutRef.current = new Map(next.map((position) => [position.peerId, position]));
+      setLayout(next);
+      if (progress < 1) frame = requestAnimationFrame(step);
+    };
+
+    frame = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(frame);
+  }, [animationSignature]);
+
+  return layout.length ? layout : targetLayout;
+}
+
+function newNodeStartPosition(target: TopologyGraphPosition, current: Map<number, TopologyGraphPosition>, links: TopologyGraphLink[]): TopologyGraphPosition {
+  const neighbors = links
+    .map((link) => {
+      if (link.fromPeerId === target.peerId) return current.get(link.toPeerId);
+      if (link.toPeerId === target.peerId) return current.get(link.fromPeerId);
+      return undefined;
+    })
+    .filter((position): position is TopologyGraphPosition => !!position);
+  if (neighbors.length === 0) return { ...target, x: GRAPH_WIDTH / 2, y: GRAPH_HEIGHT / 2 };
+  const x = neighbors.reduce((sum, position) => sum + position.x, 0) / neighbors.length;
+  const y = neighbors.reduce((sum, position) => sum + position.y, 0) / neighbors.length;
+  return { ...target, x: Math.round(x), y: Math.round(y) };
 }
 
 function RouteTable({ routes, nodeByPeerId, t }: { routes: RoutePathSnapshot[]; nodeByPeerId: Map<number, RoutePeerSnapshot>; t: Translator }) {
@@ -294,28 +357,6 @@ function peerFor(peerId: number, nodeByPeerId: Map<number, RoutePeerSnapshot>): 
   };
 }
 
-function graphPositions(peerIds: number[]): Map<number, { x: number; y: number }> {
-  const ids = [...peerIds].sort((a, b) => {
-    if (a === EDGE_PEER_ID) return -1;
-    if (b === EDGE_PEER_ID) return 1;
-    return a - b;
-  });
-  const positions = new Map<number, { x: number; y: number }>();
-  const center = { x: GRAPH_WIDTH / 2, y: GRAPH_HEIGHT / 2 };
-  positions.set(ids[0], center);
-  const outer = ids.slice(1);
-  const radiusX = GRAPH_WIDTH * 0.36;
-  const radiusY = GRAPH_HEIGHT * 0.30;
-  outer.forEach((peerId, index) => {
-    const angle = (Math.PI * 2 * index) / Math.max(1, outer.length) - Math.PI / 2;
-    positions.set(peerId, {
-      x: center.x + Math.cos(angle) * radiusX,
-      y: center.y + Math.sin(angle) * radiusY,
-    });
-  });
-  return positions;
-}
-
 function sourceLabel(source: TopologyEdge['source'], t: Translator): string {
   return source === 'peer_center' ? t('topology.source.peer_center') : t('topology.source.conn_bitmap');
 }
@@ -324,9 +365,21 @@ function sourceListLabel(sources: Array<TopologyEdge['source']>, t: Translator):
   return sources.map((source) => sourceLabel(source, t)).join(' + ');
 }
 
+function graphLayoutSignature(peerIds: number[], links: TopologyGraphLink[]): string {
+  const peerKey = [...peerIds].sort((a, b) => a - b).join(',');
+  const linkKey = links
+    .map((link) => `${link.fromPeerId}:${link.toPeerId}:${link.sources.join('+')}:${link.directedCount}:${link.latencyMs ?? ''}`)
+    .join('|');
+  return `${peerKey}#${linkKey}`;
+}
+
 function graphLinkClass(link: TopologyGraphLink): string {
   if (link.sources.includes('conn_bitmap') && link.sources.includes('peer_center')) return 'hybrid';
   return link.sources.includes('peer_center') ? 'peer-center' : 'conn-bitmap';
+}
+
+function nodeRadius(node: TopologyGraphPosition): number {
+  return 17 + Math.min(6, node.degree);
 }
 
 function graphLinkLabel(link: TopologyGraphLink): string {
