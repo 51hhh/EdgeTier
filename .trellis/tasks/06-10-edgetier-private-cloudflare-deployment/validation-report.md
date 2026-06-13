@@ -471,3 +471,59 @@ Reviewer local gate:
 - `npm test`: passed, 96 tests.
 - `npm run proto:check`: passed.
 - `git diff --check`: passed.
+
+## Kumo UI Modernization Deployment
+
+Deployment version:
+
+- Version ID: `04b378e1-dd39-4dce-9c0e-1487b49f4d2e`
+- Commit: `0cdea30 feat(dashboard): modernize UI with Kumo charts and optimized topology`
+- URL: `https://edgetier.zzhhh2005.workers.dev`
+
+Changes included:
+
+- Kumo `TimeseriesChart` + ECharts for traffic visualization
+- `ChartLegend.LargeItem` for overview metric cards with semantic colors
+- Optimized topology graph: dynamic collision radii, compact labels, edge endpoint inclusion
+- Lazy-loaded TrafficChart chunk (194 KB gzip)
+- Force-directed layout improvements: spacing based on node degree and label footprint
+
+Local gate:
+
+- `npm run typecheck`: passed
+- `npm test`: passed, 96 tests (17 files)
+- `npm run proto:check`: passed
+- `npm run build`: passed
+  - Main chunk: `index-CHyJEWxC.js` ~576 KB minified, 180 KB gzip
+  - Lazy chunk: `TrafficChart-DEptmTr9.js` ~572 KB minified, 194 KB gzip
+  - CSS: `index-DY_OCgty.css` ~146 KB minified, 23 KB gzip
+
+Deployment:
+
+- `npx wrangler deploy`: succeeded in 23.77 sec
+- Assets: 5 files, 179 KB / 38.91 KB gzip
+- Worker startup time: 5 ms
+
+Online validation:
+
+- `POST /api/auth/login`: `200 {"ok":true}`
+- `GET /api/health`: `200`, reports 9 capabilities
+- `GET /dashboard/`: `200`, serves new bundle with lazy-loaded chart
+- `GET /api/default-room`: `200 {"roomId":"home-mesh"}`
+- `GET /api/rooms/home-mesh`: `200`, `peerCount=4`, `websocketCount=0`, `trafficSamples=15`
+- `GET /api/rooms/home-mesh/topology`: `200`, `4 nodes / 11 edges / 3 routes`
+- `GET /api/rooms/home-mesh/outbound-tcp`: `200`, `1 peer`, `connected=true`, `handshakeAccepted=true`
+- `GET /assets/TrafficChart-DEptmTr9.js`: `200`, lazy chunk accessible with session cookie
+
+Real topology snapshot:
+
+- Peers: `edgetier-worker`, `home-kwrt`, `toe2-ubuntu24`, `rick-MRGF-XX`
+- Outbound TCP peer: `tcp://ip.ziyourufeng.eu.org:11010` (home-kwrt)
+- Connection status: connected, handshake accepted, rx=23.27 KB, tx=36.16 KB
+
+Notes:
+
+- Lazy loading works correctly: TrafficChart chunk is not included in initial HTML
+- Auth-protected assets require session cookie
+- Bundle size optimization successful: ECharts isolated to lazy chunk
+- All Kumo components render correctly in production
