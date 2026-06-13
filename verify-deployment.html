@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EdgeTier 部署验证</title>
+    <style>
+        body {
+            font-family: monospace;
+            padding: 20px;
+            background: #0a0a0a;
+            color: #0f0;
+        }
+        .check { margin: 10px 0; padding: 10px; background: #1a1a1a; border-left: 4px solid #0f0; }
+        .fail { border-left-color: #f00; color: #f00; }
+        .pass { border-left-color: #0f0; color: #0f0; }
+        button {
+            background: #0f0;
+            color: #000;
+            border: none;
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        #result { white-space: pre-wrap; }
+    </style>
+</head>
+<body>
+    <h1>EdgeTier 拓扑图功能验证</h1>
+
+    <h2>部署信息</h2>
+    <div class="check">
+        <strong>版本:</strong> 3024c36a-4b80-4f6a-9544-c1c85645ca40<br>
+        <strong>Bundle:</strong> index-Cfajs5m4.js<br>
+        <strong>URL:</strong> <a href="https://edgetier.zzhhh2005.workers.dev" target="_blank">https://edgetier.zzhhh2005.workers.dev</a>
+    </div>
+
+    <h2>清除缓存步骤</h2>
+    <div class="check">
+        <p>1. <button onclick="window.location.reload(true)">点击这里硬刷新</button></p>
+        <p>2. 或按 Ctrl+Shift+R (Windows) / Cmd+Shift+R (Mac)</p>
+        <p>3. 或打开开发者工具 (F12)，右键刷新按钮，选择"清空缓存并硬性重新加载"</p>
+    </div>
+
+    <h2>功能测试</h2>
+    <div class="check">
+        <h3>1. 滚轮缩放测试</h3>
+        <p>✓ 打开 Dashboard: <a href="https://edgetier.zzhhh2005.workers.dev/dashboard/" target="_blank">https://edgetier.zzhhh2005.workers.dev/dashboard/</a></p>
+        <p>✓ 找到拓扑图（连接图）</p>
+        <p>✓ 鼠标移到图上</p>
+        <p>✓ 滚动鼠标滚轮</p>
+        <p><strong>预期：图形缩放，页面不滚动</strong></p>
+    </div>
+
+    <div class="check">
+        <h3>2. 节点悬浮测试</h3>
+        <p>✓ 鼠标移到任意节点（彩色圆圈）上</p>
+        <p>✓ 等待 1-2 秒</p>
+        <p><strong>预期：显示多行工具提示</strong></p>
+        <pre>
+示例：
+peer ...819573 (1651819573) - home-kwrt
+UDP NAT: NoPAT
+TCP NAT: NoPAT
+IP: 10.144.1.1
+Version: 2.6.4-8428a89d
+Latency: 65 ms
+        </pre>
+    </div>
+
+    <h2>开发者工具验证</h2>
+    <div class="check">
+        <p>1. 按 F12 打开开发者工具</p>
+        <p>2. 切换到 Console 标签</p>
+        <p>3. 粘贴并运行以下代码：</p>
+        <button onclick="copyCode()">复制验证代码</button>
+        <pre id="code">// 验证滚轮事件
+const svg = document.querySelector('.topology-graph svg');
+if (svg) {
+    console.log('✓ SVG 找到');
+    console.log('✓ onWheel 绑定:', svg.onwheel !== null);
+} else {
+    console.log('✗ SVG 未找到');
+}
+
+// 验证节点 tooltip
+const nodes = document.querySelectorAll('.graph-node-group title');
+if (nodes.length > 0) {
+    console.log('✓ 找到', nodes.length, '个节点');
+    console.log('✓ 第一个节点 tooltip:');
+    console.log(nodes[0].textContent);
+} else {
+    console.log('✗ 未找到节点');
+}</pre>
+    </div>
+
+    <h2>如果还是不工作</h2>
+    <div class="check fail">
+        <p>请提供以下信息：</p>
+        <ol>
+            <li>浏览器名称和版本（Chrome/Firefox/Edge）</li>
+            <li>是否已经硬刷新（Ctrl+Shift+R）</li>
+            <li>开发者工具 Console 中的验证代码输出</li>
+            <li>截图</li>
+        </ol>
+    </div>
+
+    <script>
+        function copyCode() {
+            const code = document.getElementById('code').textContent;
+            navigator.clipboard.writeText(code).then(() => {
+                alert('代码已复制到剪贴板！\n现在打开 Dashboard，按 F12，粘贴到 Console 并回车');
+            });
+        }
+    </script>
+</body>
+</html>
