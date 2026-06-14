@@ -1,20 +1,41 @@
 # Dependencies
 node_modules/
+.npm
 
-# Build outputs
-/dist/
-.wrangler/
+# Build output
+dist/
+.output/
 
-# Local environment and logs
-.dev.vars
+# Environment variables
 .env
-.env.*
+.env.local
+.env.*.local
+.dev.vars
+
+# Wrangler
+.wrangler/
+.mf/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test coverage
+coverage/
+
+# Logs
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-pnpm-debug.log*
-.mindfs/
 
-# Local research clones and scratch references
-/research/
+# Temporary files
+*.tmp
+.temp/
