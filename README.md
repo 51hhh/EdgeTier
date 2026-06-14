@@ -4,6 +4,8 @@
 
 **EdgeTier** - A private mesh network relay and monitoring dashboard for EasyTier
 
+English | [简体中文](README.zh-CN.md)
+
 [Features](#features) • [Quick Start](#quick-start) • [Dashboard](#dashboard) • [Deployment](#deployment) • [Development](#development)
 
 </div>
