@@ -39,3 +39,12 @@ yarn-error.log*
 # Temporary files
 *.tmp
 .temp/
+
+# Claude Code internal
+.mindfs/
+
+# Research and reference materials
+research/
+
+
+.mindfs/
