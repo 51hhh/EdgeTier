@@ -1,0 +1,19 @@
+[Unit]
+Description=EdgeTier sanitized OneCloud DDNS and EasyTier report
+Wants=network-online.target
+After=network-online.target easytier-core-home.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/edgetier-host-agent
+TimeoutStartSec=600
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target

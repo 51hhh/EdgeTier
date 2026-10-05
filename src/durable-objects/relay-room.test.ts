@@ -121,10 +121,21 @@ describe('resolveDefaultRoomConfig', () => {
 });
 
 describe('resolveOutboundTcpPeers', () => {
-  it('uses global public TCP peer fallback', () => {
-    expect(resolveOutboundTcpPeers({ EASYTIER_PUBLIC_PEER_TCP: 'tcp://example.com:11010' }, 'home-mesh')).toEqual([
+  it('uses the public TCP fallback only for the resolved default room', () => {
+    const env = { EASYTIER_NETWORK_NAME: 'home-mesh', EASYTIER_PUBLIC_PEER_TCP: 'tcp://example.com:11010' };
+    expect(resolveOutboundTcpPeers(env, 'home-mesh')).toEqual([
       { uri: 'tcp://example.com:11010', hostname: 'example.com', port: 11010 },
     ]);
+    expect(resolveOutboundTcpPeers(env, 'alias-room')).toEqual([]);
+    expect(resolveOutboundTcpPeers({ EASYTIER_PUBLIC_PEER_TCP: 'tcp://example.com:11010' }, 'default')).toHaveLength(1);
+  });
+
+  it('keeps explicit alias peers and derives fallback ownership from the configured default room', () => {
+    const env = { EASYTIER_NETWORK_NAME: 'global-mesh', EASYTIER_NETWORKS: JSON.stringify({ home: { networkName: 'actual-mesh' } }),
+      EASYTIER_PUBLIC_PEER_TCP: 'tcp://global.example:11010', EASYTIER_OUTBOUND_TCP_PEERS: JSON.stringify({ alias: 'tcp://alias.example:11010' }) };
+    expect(resolveOutboundTcpPeers(env, 'home').map((peer) => peer.uri)).toEqual(['tcp://global.example:11010']);
+    expect(resolveOutboundTcpPeers(env, 'global-mesh')).toEqual([]);
+    expect(resolveOutboundTcpPeers(env, 'alias').map((peer) => peer.uri)).toEqual(['tcp://alias.example:11010']);
   });
 
   it('supports per-room outbound TCP peer maps', () => {
@@ -134,6 +145,7 @@ describe('resolveOutboundTcpPeers', () => {
         lab: { peers: 'tcp://lab.example:11010' },
       }),
       EASYTIER_PUBLIC_PEER_TCP: 'tcp://global.example:11010',
+      EASYTIER_NETWORK_NAME: 'home',
     }, 'home')).toEqual([
       { uri: 'tcp://home.example:11010', hostname: 'home.example', port: 11010 },
       { uri: 'tcp://backup.example:11011', hostname: 'backup.example', port: 11011 },
@@ -157,6 +169,10 @@ describe('resolveOutboundTcpPeers', () => {
 });
 
 describe('outboundRoomIdsForMaintenance', () => {
+  it('does not revive stored aliases from an implicit default gateway', () => {
+    expect(outboundRoomIdsForMaintenance({ EASYTIER_NETWORK_NAME: 'home-mesh', EASYTIER_PUBLIC_PEER_TCP: 'tcp://example.com:11010' }, ['home-mesh', 'alias-room'])).toEqual(['home-mesh']);
+  });
+
   it('seeds the default room when a global public TCP peer is configured', () => {
     expect(outboundRoomIdsForMaintenance({
       EASYTIER_NETWORK_NAME: 'home-mesh',
@@ -191,15 +207,16 @@ describe('buildRouteConnBitmapForUpdate', () => {
       7,
       [{ fromPeerId: 42, toPeerId: 100, source: 'conn_bitmap' }],
       new Set([42]),
+      new Map([[42, 3], [100, 4]]),
     );
     const peerIds = bitmap.peerIds.map((item) => item.peerId);
     const edgeIndex = peerIds.indexOf(EDGE_PEER_ID);
     const peer42Index = peerIds.indexOf(42);
     const peer100Index = peerIds.indexOf(100);
 
-    expect(bitmap.peerIds.every((item) => item.version === 7)).toBe(true);
+    expect(bitmap.peerIds).toEqual([{ peerId: 42, version: 3 }, { peerId: 100, version: 4 }, { peerId: EDGE_PEER_ID, version: 7 }]);
     expect(bitmapHas(bitmap.bitmap, peerIds.length, edgeIndex, peer42Index)).toBe(true);
-    expect(bitmapHas(bitmap.bitmap, peerIds.length, peer42Index, edgeIndex)).toBe(true);
+    expect(bitmapHas(bitmap.bitmap, peerIds.length, peer42Index, edgeIndex)).toBe(false);
     expect(bitmapHas(bitmap.bitmap, peerIds.length, peer42Index, peer100Index)).toBe(true);
     expect(bitmapHas(bitmap.bitmap, peerIds.length, edgeIndex, peer100Index)).toBe(false);
     expect(bitmapHas(bitmap.bitmap, peerIds.length, peer100Index, peer42Index)).toBe(false);

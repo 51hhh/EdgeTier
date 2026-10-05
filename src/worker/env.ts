@@ -1,6 +1,9 @@
 export interface Env {
   RELAY_ROOM: DurableObjectNamespace;
   DIRECTORY: DurableObjectNamespace;
+  HOST_STATE?: DurableObjectNamespace;
+  HOST_PROFILES?: string;
+  HOST_REPORT_TOKENS?: string;
   ASSETS?: Fetcher;
   ADMIN_USERNAME?: string;
   ADMIN_PASSWORD?: string;

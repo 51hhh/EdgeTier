@@ -6,6 +6,8 @@
 
 ## Overview
 
+The authorized host/DDNS integration follows [Host Management](./host-management.md). It adds credential-free host DTOs in `src/observer/host-types.ts` and one explicit fixed DDNS refresh action; historical read-only guidance below still applies to EasyTier child-node control.
+
 EdgeTier v0.1.1 dashboard uses local React state and polling for server state. There is no global client state library yet.
 
 Server state remains authoritative in Worker/Durable Object APIs. The dashboard caches only the latest successful poll results in component state and keeps those results visible through transient API errors.
@@ -160,3 +162,67 @@ Use typed fetch helpers in `src/dashboard/api.ts`. Polling is acceptable for v0.
 **Fix**: Keep previous successful state and show an error banner.
 
 **Prevention**: Treat polling errors as temporary unless the user explicitly changes selection or refreshes.
+
+
+## Scenario: Room Identity Changes and Late Responses
+
+### 1. Scope / Trigger
+
+Apply when changing room selection, room polling or asynchronous WSS token issuance. Same-room errors may retain data; a new selection must not retain another room's data or token.
+
+### 2. Signatures
+
+```typescript
+roomForSelection(snapshot: RoomSnapshot | null, selected: string | null): RoomSnapshot | null
+createSelectionGuard(): {
+  select(next: string | null): void;
+  capture(): { selection: string | null; revision: number };
+  isCurrent(ticket: { selection: string | null; revision: number }): boolean;
+}
+```
+
+Implementation: `src/dashboard/room-state.ts`. `App` consumes identity-gated snapshots; `ConfigGenerator` also uses the revision guard for token and clipboard completion.
+
+### 3. Contracts
+
+- Selection changes clear room data, selection-bound WSS URI/error, peer selection and TCP state. Selecting the same room does not discard its cached data.
+- Every room render consumes `roomForSelection`; a snapshot belongs only to its exact selected room.
+- Returned room/topology/outbound response IDs must all match the request selection before installing polling data. Old effects ignore results after cleanup.
+- Capture a revision ticket before token requests and require it to remain current before applying a URI or error. A -> B -> A must invalidate the first A request.
+- Guard lifecycle setup restores the current selection after effect replay; cleanup selects null to invalidate unmounted requests. A normal render without identity change leaves current tickets valid.
+- Config profile identity includes host, room and network, with secret/config reset when that identity changes. Clipboard completion additionally requires the rendered TOML to remain identical.
+
+### 4. Validation & Error Matrix
+
+| Condition | Behavior |
+| --- | --- |
+| Same selected-room poll fails | Retain that room's previous data and show error |
+| Selection changes and new poll fails | New room error/empty state, no old peer/topology/URI |
+| API room/topology/outbound IDs mismatch | Visible response mismatch error; do not install snapshot |
+| Token response arrives after identity changes | Ignore URI and stale error |
+| A -> B -> A while request is pending | First request ticket is invalid |
+| Unmount or effect replay cleanup | Invalidate pending ticket; setup restores active identity |
+
+### 5. Good / Base / Bad Cases
+
+- Good: beta selected with failed fetch shows beta failure; alpha peers never appear under beta.
+- Base: alpha's temporary poll failure keeps alpha's last known snapshot.
+- Bad: setting selected=beta while preserving alpha data and accepting a late alpha token.
+
+### 6. Tests Required
+
+`room-state.test.ts` tests same-room preservation/cross-room rejection, actual deferred late responses, A -> B -> A revision handling, and cleanup/replay restoration. Browser QA should verify alpha -> beta with an intentionally failed beta response. Run typecheck and build after token/UI changes.
+
+### 7. Wrong vs Correct
+
+```typescript
+// Wrong: the new header can be paired with the prior room's peer table.
+setSelected(next);
+render(room);
+
+// Correct: clear on identity change and gate all snapshot consumers.
+setSelected(next);
+setRoom(null);
+setRelayUri(null);
+render(roomForSelection(roomSnapshot, selected));
+```

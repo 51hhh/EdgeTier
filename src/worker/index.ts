@@ -1,7 +1,9 @@
 export { RelayRoom } from '../durable-objects/relay-room';
 export { Directory } from '../durable-objects/directory';
+export { HostState } from '../durable-objects/host-state';
 
 import { handleApi, json, roomStub, validRoom } from '../observer/api';
+import { handleHostApi, handleHostReport, isHostReportPath } from '../observer/host-api';
 import { authConfigured, clearSessionCookie, createSessionCookie, credentialsValid, verifyRelayToken, verifySessionRequest } from './auth';
 import type { Env } from './env';
 
@@ -25,9 +27,13 @@ export default {
       return roomStub(env, roomId).fetch(`https://room/connect?room=${encodeURIComponent(roomId)}`, request);
     }
 
+    if (isHostReportPath(url.pathname)) return handleHostReport(request, env);
+
     const session = await verifySessionRequest(request, env);
     if (!session) return unauthorizedResponse(request, url);
 
+    const hostApi = await handleHostApi(request, env);
+    if (hostApi) return hostApi;
     const api = await handleApi(request, env, session);
     if (api) return api;
     if (url.pathname === '/dashboard') return Response.redirect(`${url.origin}/dashboard/`, 302);

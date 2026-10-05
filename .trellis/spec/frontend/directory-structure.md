@@ -6,6 +6,8 @@
 
 ## Overview
 
+The authorized host/DDNS integration follows [Host Management](./host-management.md). It adds credential-free host DTOs in `src/observer/host-types.ts` and one explicit fixed DDNS refresh action; historical read-only guidance below still applies to EasyTier child-node control.
+
 EdgeTier frontend code is a React + Vite dashboard embedded in the same repository as the Cloudflare Worker. The dashboard consumes the read-only observer API and uses Cloudflare Kumo for UI components.
 
 Frontend code must not import Worker/Durable Object runtime code directly. Shared data contracts come from `src/observer/types.ts`.

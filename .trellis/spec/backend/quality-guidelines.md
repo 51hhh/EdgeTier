@@ -348,7 +348,7 @@ POST /api/rooms/:roomId/outbound-tcp  -> OutboundTcpStatus after ensuring config
 Environment:
 
 ```text
-EASYTIER_PUBLIC_PEER_TCP       # optional single-network tcp://host:port fallback
+EASYTIER_PUBLIC_PEER_TCP       # optional tcp://host:port fallback for the resolved default room only
 EASYTIER_OUTBOUND_TCP_PEERS    # optional JSON/string list; supports per-room maps
 ```
 
@@ -376,7 +376,7 @@ EASYTIER_OUTBOUND_TCP_PEERS    # optional JSON/string list; supports per-room ma
 
 ### 5. Good/Base/Bad Cases
 
-- Good: `EASYTIER_PUBLIC_PEER_TCP=tcp://example.com:11010` lets the room actively join via TCP when `/api/rooms/:roomId` or `/outbound-tcp` is accessed.
+- Good: `EASYTIER_PUBLIC_PEER_TCP=tcp://example.com:11010` lets only the resolved default room join that gateway. Other rooms use explicit `EASYTIER_OUTBOUND_TCP_PEERS` mappings; opening an unmapped alias must not create another same-identity gateway connection.
 - Good: `EASYTIER_OUTBOUND_TCP_PEERS={"home":["tcp://a:11010"],"lab":{"peers":"tcp://b:11010"}}` scopes TCP peers per room.
 - Base: no outbound TCP env is configured; WSS inbound behavior remains unchanged.
 - Bad: treating TCP stream chunks as complete EasyTier frames without the 4-byte length prefix.
@@ -387,7 +387,7 @@ EASYTIER_OUTBOUND_TCP_PEERS    # optional JSON/string list; supports per-room ma
 
 - Unit test TCP length-prefix encode/decode for single, fragmented, coalesced, too-short, and too-large frames.
 - Unit test `parseTcpPeerUri` accepts `tcp://host:port` and rejects unsupported schemes or incomplete URIs.
-- Unit test `resolveOutboundTcpPeers` for global fallback, per-room JSON maps, duplicates, and invalid entries.
+- Unit test `resolveOutboundTcpPeers` for default-room-only implicit fallback, preserved explicit per-room maps, duplicates, and invalid entries. Add two actual named-object regressions showing that the default dials while an unmapped alias does not, and that its obsolete alias TCP session closes on alarm.
 - Full gate after changes: `npm run typecheck`, `npm test`, `npm run build`, `npm run proto:check`.
 - Live validation before claiming compatibility: deployed Worker reports `handshakeAccepted=true`, increasing rx/tx, and decoded route/topology data from a real EasyTier node.
 

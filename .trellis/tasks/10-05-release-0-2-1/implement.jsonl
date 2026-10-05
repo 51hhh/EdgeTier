@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend quality gates"}
+{"file": ".trellis/spec/backend/host-management.md", "reason": "Existing host/status/DDNS contract"}
+{"file": ".trellis/spec/backend/relay-lifecycle.md", "reason": "Repaired core lifecycle and persistence"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Controlled input failures"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Protocol/build gates"}
+{"file": ".trellis/spec/frontend/host-management.md", "reason": "Page/export behavior"}
+{"file": ".trellis/tasks/10-05-full-function-review/research/identity-review.md", "reason": "Functional fixes and production divergence"}

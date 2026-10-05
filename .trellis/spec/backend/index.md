@@ -19,6 +19,8 @@ This directory documents EdgeTier backend conventions for the TypeScript Cloudfl
 | [Error Handling](./error-handling.md) | API errors and relay packet error/event behavior | Filled |
 | [Quality Guidelines](./quality-guidelines.md) | Worker/protocol quality, tests, and proto drift rules | Filled |
 | [Logging Guidelines](./logging-guidelines.md) | Relay events and safe observability logging | Filled |
+| [Host Management](./host-management.md) | Authenticated host reports, DDNS command and config-profile contracts | Filled |
+| [Relay Lifecycle](./relay-lifecycle.md) | Per-room ownership, overlap recovery, route owner versions and bounded queues/RPC retention | Filled |
 
 ---
 
@@ -31,6 +33,7 @@ Before backend changes:
 3. Read [Quality Guidelines](./quality-guidelines.md) before touching EasyTier protocol code or Worker bindings.
 4. Read [Database Guidelines](./database-guidelines.md) before changing Durable Object storage or adding D1/KV/Analytics.
 5. Read [Logging Guidelines](./logging-guidelines.md) before adding relay events or console logs.
+6. Read [Host Management](./host-management.md) before changing host ingestion, DDNS operations, host state storage or direct config profiles.
 
 ---
 

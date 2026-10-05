@@ -6,6 +6,8 @@
 
 ## Overview
 
+The authorized host/DDNS integration follows [Host Management](./host-management.md). It adds credential-free host DTOs in `src/observer/host-types.ts` and one explicit fixed DDNS refresh action; historical read-only guidance below still applies to EasyTier child-node control.
+
 Frontend quality is verified through TypeScript, Vitest, Vite production build, and dashboard/API contract consistency. The dashboard is read-only and must remain aligned with observer API DTOs.
 
 ---

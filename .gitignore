@@ -48,3 +48,6 @@ research/
 
 
 .mindfs/
+# Python host adapter cache
+__pycache__/
+*.py[cod]

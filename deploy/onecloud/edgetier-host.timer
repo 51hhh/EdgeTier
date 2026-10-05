@@ -1,0 +1,12 @@
+[Unit]
+Description=Report OneCloud service and mesh status to EdgeTier every minute
+
+[Timer]
+OnBootSec=45s
+OnUnitInactiveSec=60s
+RandomizedDelaySec=5s
+AccuracySec=1s
+Unit=edgetier-host.service
+
+[Install]
+WantedBy=timers.target

@@ -6,6 +6,8 @@
 
 ## Overview
 
+The authorized host/DDNS integration follows [Host Management](./host-management.md). It adds credential-free host DTOs in `src/observer/host-types.ts` and one explicit fixed DDNS refresh action; historical read-only guidance below still applies to EasyTier child-node control.
+
 EdgeTier v0.1 uses built-in React hooks only. Data fetching currently lives in `App` via `useEffect`, `useState`, and `useMemo` because the dashboard is small.
 
 Extract custom hooks only when multiple components need the same stateful data-fetching behavior.

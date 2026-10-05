@@ -6,6 +6,8 @@
 
 ## Overview
 
+The authorized host/DDNS integration follows [Host Management](./host-management.md). It adds credential-free host DTOs in `src/observer/host-types.ts` and one explicit fixed DDNS refresh action; historical read-only guidance below still applies to EasyTier child-node control.
+
 EdgeTier uses TypeScript across Worker, Durable Object, protocol parsing, observer API, and dashboard code. Cross-layer API payload types are centralized in `src/observer/types.ts`.
 
 Avoid duplicating payload interfaces in dashboard components. Avoid `any` for API data and protocol headers.

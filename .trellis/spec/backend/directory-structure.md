@@ -29,7 +29,10 @@ src/
 │   └── types.ts        # Protocol observation types
 └── observer/
     ├── api.ts          # Read-only API routing helpers
-    └── types.ts        # API payload contracts shared with dashboard
+    ├── types.ts        # Relay API payload contracts shared with dashboard
+    ├── host-types.ts   # Credential-free host/profile shared contracts
+    ├── host-api.ts     # Host report and admin API adapters
+    └── host-validation.ts # Strict host boundary validation
 
 proto/
 └── easytier/           # Official EasyTier proto tracking notes/files
@@ -260,3 +263,8 @@ Directed forwarding prevents cross-peer leakage and keeps relay accounting meani
 - `src/durable-objects/relay-room.ts` shows room-local WebSocket state and EasyTier packet routing.
 - `src/observer/api.ts` shows API-to-Durable Object routing.
 - `src/easytier/packet.ts` is the single source of truth for the 16-byte header layout.
+
+
+## Host Status and Fixed DDNS Control
+
+See [Host Management](./host-management.md) for the authorized fixed `ddns-refresh` exception to observer-only behavior, the per-host authentication boundary, bindings, storage and validation contracts. The existing relay APIs and independent DDNS Workers retain their behavior.

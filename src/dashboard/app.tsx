@@ -1,14 +1,18 @@
-import React, { FormEvent, useEffect, useMemo, useState } from 'react';
+import React, { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { Badge, Button, Empty, Input, LayerCard, Tabs, Text } from '@cloudflare/kumo';
-import { clearRoomSeed, createRoomRelayToken, getDefaultRoom, getOutboundTcpStatus, getRoom, getRoomEvents, getRoomTopology, getRoomTraffic, getRooms, logout, seedRoom } from './api';
+import { clearRoomSeed, createRoomRelayToken, getConfigProfiles, getDefaultRoom, getHosts, getOutboundTcpStatus, getRoom, getRoomEvents, getRoomTopology, getRoomTraffic, getRooms, logout, refreshHostDdns, seedRoom } from './api';
 import { ROOM_NAME_PATTERN } from '../easytier/constants';
 import type { DefaultRoomResponse, DirectoryRoomSummary, OutboundTcpStatus, RoomSnapshot } from '../observer/types';
+import type { ConfigProfile, HostSnapshot } from '../observer/host-types';
+import { DdnsDashboard, HostServices } from './components/Hosts';
 import { Overview } from './components/Overview';
 import { PeerDetail, PeerTable } from './components/Devices';
 import { Logs } from './components/Logs';
 import { ConfigGenerator } from './components/ConfigGenerator';
 import { Topology } from './components/Topology';
 import { createTranslator, detectLocale, persistLocale, type Locale } from './i18n';
+import { mergeHostSnapshots, unavailableHostSnapshots, unavailableConfigProfiles } from './host-display';
+import { createSelectionGuard, roomForSelection } from './room-state';
 import './styles.css';
 
 const TABS = [
@@ -16,6 +20,8 @@ const TABS = [
   { value: 'devices', labelKey: 'tabs.devices' },
   { value: 'topology', labelKey: 'tabs.topology' },
   { value: 'logs', labelKey: 'tabs.logs' },
+  { value: 'ddns', labelKey: 'tabs.ddns' },
+  { value: 'services', labelKey: 'tabs.services' },
   { value: 'config', labelKey: 'tabs.config' },
 ] as const;
 
@@ -28,7 +34,10 @@ export function App() {
   const [rooms, setRooms] = useState<DirectoryRoomSummary[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [lookup, setLookup] = useState('');
-  const [room, setRoom] = useState<RoomSnapshot | null>(null);
+  const [roomSnapshot, setRoom] = useState<RoomSnapshot | null>(null);
+  const room = roomForSelection(roomSnapshot, selected);
+  const roomRequests = useRef(createSelectionGuard());
+  roomRequests.current.select(selected);
   const [outboundTcp, setOutboundTcp] = useState<OutboundTcpStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lookupError, setLookupError] = useState<string | null>(null);
@@ -36,6 +45,53 @@ export function App() {
   const [selectedSession, setSelectedSession] = useState<string | null>(null);
   const [relayUri, setRelayUri] = useState<{ room: string; uri: string; expiresAt: string } | null>(null);
   const [tokenError, setTokenError] = useState<string | null>(null);
+  const [hosts, setHosts] = useState<HostSnapshot[]>([]);
+  const [profiles, setProfiles] = useState<ConfigProfile[]>([]);
+  const [hostError, setHostError] = useState<string | null>(null);
+  const [hostLoading, setHostLoading] = useState(true);
+  const [hostNow, setHostNow] = useState(Date.now());
+  const [requesting, setRequesting] = useState<Record<string, boolean>>({});
+  const [refreshErrors, setRefreshErrors] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    roomRequests.current.select(selected);
+    return () => roomRequests.current.select(null);
+  }, [selected]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let cancelled = false;
+    let running = false;
+    const tick = async () => {
+      setHostNow(Date.now());
+      if (running) return;
+      running = true;
+      try {
+        const [hostResult, profileResult] = await Promise.allSettled([
+          getHosts(controller.signal), getConfigProfiles(controller.signal),
+        ]);
+        if (cancelled) return;
+        setHosts((previous) => hostResult.status === 'fulfilled' ? mergeHostSnapshots(previous, hostResult.value) : unavailableHostSnapshots(previous));
+        setProfiles((previous) => profileResult.status === 'fulfilled' ? profileResult.value : unavailableConfigProfiles(previous));
+        setHostError(hostResult.status === 'rejected' || profileResult.status === 'rejected' ? t('hosts.fetchError') : null);
+        setHostLoading(false);
+      } finally { running = false; }
+    };
+    void tick();
+    const timer = setInterval(tick, 5000);
+    return () => { cancelled = true; controller.abort(); clearInterval(timer); };
+  }, [t]);
+
+  const refreshDdns = async (hostId: string) => {
+    setRequesting((current) => ({ ...current, [hostId]: true }));
+    setRefreshErrors((current) => ({ ...current, [hostId]: '' }));
+    try {
+      const command = await refreshHostDdns(hostId);
+      setHosts((current) => current.map((host) => host.profile.hostId === hostId ? { ...host, command } : host));
+    } catch (err) {
+      setRefreshErrors((current) => ({ ...current, [hostId]: `${t('ddns.refreshError')} ${err instanceof Error ? err.message : ''}` }));
+    } finally { setRequesting((current) => ({ ...current, [hostId]: false })); }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -53,7 +109,11 @@ export function App() {
   }, [t]);
 
   useEffect(() => {
+    let cancelled = false;
+    let running = false;
     const tick = async () => {
+      if (running) return;
+      running = true;
       try {
         const list = await getRooms();
         let snapshot: RoomSnapshot | null = null;
@@ -66,25 +126,34 @@ export function App() {
             getRoomTopology(selected),
             getOutboundTcpStatus(selected),
           ]);
+          if (roomSnapshot.roomId !== selected || topology.roomId !== selected || outbound.roomId !== selected) throw new Error(t('errors.roomResponseMismatch'));
           snapshot = { ...roomSnapshot, recentEvents: events, traffic, topology };
           tcpStatus = outbound;
         }
+        if (cancelled) return;
         setRooms(list);
         if (selected) setRoom(snapshot);
         setOutboundTcp(tcpStatus);
         setError(null);
         setLastRefreshed(new Date().toLocaleTimeString(locale === 'zh' ? 'zh-CN' : 'en-US'));
       } catch (err) {
-        setError(err instanceof Error ? err.message : t('errors.dashboardFetch'));
-      }
+        if (!cancelled) setError(err instanceof Error ? err.message : t('errors.dashboardFetch'));
+      } finally { running = false; }
     };
     void tick();
     const timer = setInterval(tick, 5000);
-    return () => clearInterval(timer);
+    return () => { cancelled = true; clearInterval(timer); };
   }, [locale, selected, t]);
 
   const selectRoom = (roomId: string) => {
+    roomRequests.current.select(roomId);
     setSelected(roomId);
+    if (roomId !== selected) {
+      setRoom(null);
+      setRelayUri(null);
+      setTokenError(null);
+      setError(null);
+    }
     setLookup(roomId);
     setLookupError(null);
     setSelectedSession(null);
@@ -106,12 +175,15 @@ export function App() {
       setTokenError(t('errors.tokenChooseRoom'));
       return;
     }
+    const ticket = roomRequests.current.capture();
     try {
       const token = await createRoomRelayToken(selected);
+      if (!roomRequests.current.isCurrent(ticket)) return;
+      if (token.room !== ticket.selection) throw new Error(t('errors.roomResponseMismatch'));
       setRelayUri({ room: token.room, uri: `${window.location.origin.replace(/^http/, 'ws')}${token.uriPath}`, expiresAt: token.expiresAt });
       setTokenError(null);
     } catch (err) {
-      setTokenError(err instanceof Error ? err.message : t('errors.issueToken'));
+      if (roomRequests.current.isCurrent(ticket)) setTokenError(err instanceof Error ? err.message : t('errors.issueToken'));
     }
   };
 
@@ -167,7 +239,7 @@ export function App() {
           <Button type="button" variant="ghost" onClick={signOut}>{t('app.signOut')}</Button>
         </div>
       </div>
-      <Tabs variant="underline" tabs={tabs} value={tab} onValueChange={setTab} />
+      <div className="dashboard-tabs"><Tabs variant="underline" tabs={tabs} value={tab} onValueChange={setTab} /></div>
       <div className="hero-meta">
         <Badge variant="outline">{lastRefreshed ? t('app.lastRefreshed', { time: lastRefreshed }) : t('app.loading')}</Badge>
         <Badge variant={selected ? 'primary' : 'secondary'}>{selected ? t('app.room', { room: selected }) : t('app.noRoom')}</Badge>
@@ -245,6 +317,10 @@ export function App() {
       </LayerCard.Primary>
     </LayerCard>}
 
-    {tab === 'config' && <ConfigGenerator defaultNetworkName={defaultNetworkName} t={t} />}
+    {['ddns', 'services', 'config'].includes(tab) && hostError && <section className="error-banner text-kumo-danger" role="alert">{hostError}</section>}
+    {['ddns', 'services', 'config'].includes(tab) && hostLoading && <Text as="p" variant="secondary" role="status">{t('app.loading')}</Text>}
+    {tab === 'ddns' && !hostLoading && <DdnsDashboard hosts={hosts} now={hostNow} t={t} requesting={requesting} refreshErrors={refreshErrors} onRefresh={refreshDdns} />}
+    {tab === 'services' && !hostLoading && <HostServices hosts={hosts} now={hostNow} t={t} />}
+    {tab === 'config' && !hostLoading && <ConfigGenerator profiles={profiles} t={t} />}
   </main>;
 }

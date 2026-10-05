@@ -71,6 +71,12 @@ type Session = PeerSnapshot & {
   outboundPeerUri?: string;
   outboundHandshakeSent?: boolean;
   routeInfoResyncRequestedAt?: number;
+  retired?: boolean;
+  closeStarted?: boolean;
+  queuedReadBytes?: number;
+  queuedReadFrames?: number;
+  queuedWriteBytes?: number;
+  queuedWriteFrames?: number;
 };
 
 export interface NetworkConfig {
@@ -90,6 +96,7 @@ interface PersistedPeerCenterEntry {
 }
 
 interface PersistedControlState {
+  roomId?: string;
   routeVersion: number;
   topologyUpdatedAt?: string;
   routePeers: RoutePeerSnapshot[];
@@ -98,9 +105,22 @@ interface PersistedControlState {
   connBitmapEdges: TopologyEdge[];
   peerCenter: PersistedPeerCenterEntry[];
   outboundRoomIds?: string[];
+  connRows?: ConnectionRow[];
+  unconfirmedRoutePeerIds?: number[];
+  unconfirmedConnPeerIds?: number[];
+  unconfirmedPeerCenterIds?: number[];
+}
+
+interface ConnectionRow {
+  peerId: number;
+  version: number;
+  connectedPeerIds: number[];
+  lastSeen: string;
+  sourcePeerId?: number;
 }
 
 export interface PendingRouteSync {
+  sentAt?: number;
   peerInfos: RoutePeerInfo[];
   connBitmap?: RouteConnBitmap;
   connPeerList?: RouteConnPeerList;
@@ -133,8 +153,23 @@ const TRAFFIC_SAMPLE_INTERVAL_MS = 5_000;
 const TRAFFIC_SAMPLES_LIMIT = 120;
 const CONTROL_STATE_STORAGE_KEY = 'control-state:v1';
 const WS_OPEN = 1;
+export const RELAY_QUEUE_LIMITS = { sessionFrames: 64, sessionBytes: 2 * MAX_FRAME_SIZE, roomFrames: 512, roomBytes: 8 * MAX_FRAME_SIZE } as const;
+export const ROUTE_SYNC_TIMEOUT_MS = 5_000;
+export const MAX_PENDING_ROUTE_SYNCS = 8;
+const MAX_RPC_MERGERS_PER_SESSION = 32;
 
 export class RelayRoom implements DurableObject {
+  private roomId: string | undefined;
+  private ownerClaim: Promise<void> | undefined;
+  private readonly ready: Promise<void>;
+  private connRows = new Map<number, ConnectionRow>();
+  private unconfirmedRoutePeerIds = new Set<number>();
+  private unconfirmedConnPeerIds = new Set<number>();
+  private unconfirmedPeerCenterIds = new Set<number>();
+  private queuedReadBytes = 0;
+  private queuedReadFrames = 0;
+  private queuedWriteBytes = 0;
+  private queuedWriteFrames = 0;
   private sessions = new Map<string, Session>();
   private peers = new Map<number, string>();
   private events: RelayEvent[] = [];
@@ -158,15 +193,24 @@ export class RelayRoom implements DurableObject {
   private knownOutboundRoomIds = new Set<string>();
 
   constructor(private readonly state: DurableObjectState, private readonly env: Env) {
-    this.state.blockConcurrencyWhile(async () => {
+    this.ready = this.state.blockConcurrencyWhile(async () => {
       await this.loadControlState();
       await this.ensureMaintenanceAlarm();
     });
   }
 
   async fetch(request: Request): Promise<Response> {
+    await this.ready;
     const url = new URL(request.url);
     const roomId = url.searchParams.get('room') ?? 'default';
+    if (!ROOM_NAME_PATTERN.test(roomId)) return Response.json({ error: 'invalid room name' }, { status: 400 });
+    if (this.roomId && this.roomId !== roomId) return Response.json({ error: 'room identity conflict' }, { status: 409 });
+    if (!this.roomId) {
+      this.roomId = roomId;
+      this.ownerClaim = this.persistControlState().catch((error) => { this.roomId = undefined; throw error; })
+        .finally(() => { this.ownerClaim = undefined; });
+    }
+    if (this.ownerClaim) await this.ownerClaim;
     if (url.pathname === '/connect') return this.acceptWebSocket(request, roomId);
     this.rememberOutboundRoomIfConfigured(roomId);
     this.state.waitUntil(this.ensureConfiguredOutboundTcp(roomId).catch(() => {
@@ -182,11 +226,14 @@ export class RelayRoom implements DurableObject {
   }
 
   async alarm(): Promise<void> {
+    await this.ready;
+    if (this.ownerClaim) await this.ownerClaim;
     const outboundRoomIds = this.outboundRoomIdsForMaintenance();
-    const roomId = this.currentRoomId() ?? outboundRoomIds[0];
+    const roomId = this.roomId ?? this.currentRoomId() ?? outboundRoomIds[0];
     const pruned = this.pruneStaleRouteState();
     this.runHeartbeatMaintenance();
-    for (const outboundRoomId of outboundRoomIds) await this.ensureConfiguredOutboundTcp(outboundRoomId);
+    // An empty owner configuration also retires connections removed by a config/policy change.
+    if (this.roomId) await this.ensureConfiguredOutboundTcp(this.roomId);
     if (pruned) {
       await this.persistControlState();
       if (roomId) await this.syncDirectory(roomId);
@@ -241,9 +288,16 @@ export class RelayRoom implements DurableObject {
   }
 
   private enqueueMessage(session: Session, event: MessageEvent): void {
-    const run = session.messageQueue.then(() => this.onMessage(session, event));
+    if (!this.sessionActive(session)) return;
+    const bytes = messageByteLength(event.data);
+    if (bytes === undefined) return this.invalid(session, 'unsupported websocket frame type');
+    if (bytes > MAX_FRAME_SIZE) return this.invalid(session, 'frame size limit exceeded');
+    if (!this.reserveQueue(session, 'read', bytes)) return;
+    const run = session.messageQueue.then(() => this.sessionActive(session) ? this.onMessage(session, event) : undefined)
+      .catch(() => { if (this.sessionActive(session)) this.invalid(session, 'message handling failed'); })
+      .finally(() => this.releaseQueue(session, 'read', bytes));
     session.messageQueue = run.catch(() => undefined);
-    this.state.waitUntil(run.catch(() => this.invalid(session, 'message handling failed')));
+    this.state.waitUntil(run);
   }
 
   private async onMessage(session: Session, event: MessageEvent): Promise<void> {
@@ -259,16 +313,18 @@ export class RelayRoom implements DurableObject {
   }
 
   private async onEasyTierFrame(session: Session, frame: ArrayBuffer): Promise<void> {
+    if (!this.sessionActive(session)) return;
     const header = parseEasyTierHeader(frame);
     if (!header || !payloadLengthMatches(frame, header)) return this.invalid(session, 'invalid EasyTier packet header or length');
     session.rxPackets += 1;
     this.traffic.rxPackets += 1;
-    this.bindPeerFromFrame(session, header);
     const payload = new Uint8Array(frame, EASYTIER_HEADER_SIZE);
     if (header.packetType === EasyTierPacketType.HandShake) {
       await this.handleHandshake(session, header, payload, frame);
       return;
     }
+    if (!session.handshakeAccepted && this.networkConfigFor(session.roomId).secret) return this.invalid(session, 'packet received before accepted handshake');
+    this.bindPeerFromFrame(session, header);
     if (header.packetType === EasyTierPacketType.Ping) {
       session.lastPongReceived = Date.now();
       this.sendFrame(session, header.fromPeerId, EasyTierPacketType.Pong, payload);
@@ -312,7 +368,6 @@ export class RelayRoom implements DurableObject {
       this.closeSessionTransport(session, 1008, 'peer id conflict');
       return;
     }
-    this.bindPeer(session, clientPeerId);
     session.networkName = clientReq.networkName || session.networkName;
     session.networkSecretDigestPrefix = hex(clientReq.networkSecretDigest).slice(0, 12) || undefined;
 
@@ -329,6 +384,7 @@ export class RelayRoom implements DurableObject {
       return;
     }
     if (!networkConfig.secret) {
+      this.bindPeer(session, clientPeerId);
       this.addEvent(session.roomId, 'handshake_seen', 'handshake observed; network secret is not configured', session);
       return;
     }
@@ -342,6 +398,7 @@ export class RelayRoom implements DurableObject {
 
     session.keys = deriveKeys(networkConfig.secret);
     session.handshakeAccepted = true;
+    this.bindPeer(session, clientPeerId);
     ensureOspfRouteSession(session);
     this.sendFrame(session, clientPeerId, EasyTierPacketType.HandShake, encodeHandshake(response));
     this.addEvent(session.roomId, 'handshake_seen', 'handshake accepted', session);
@@ -390,9 +447,9 @@ export class RelayRoom implements DurableObject {
       return;
     }
 
-    this.bindPeer(session, remotePeerId);
     session.keys = deriveKeys(networkConfig.secret);
     session.handshakeAccepted = true;
+    this.bindPeer(session, remotePeerId);
     ensureOspfRouteSession(session);
     this.addEvent(session.roomId, 'handshake_seen', 'outbound tcp handshake accepted', session);
     this.queueDirectorySync(session.roomId, true);
@@ -402,6 +459,7 @@ export class RelayRoom implements DurableObject {
   }
 
   private async handleRpc(session: Session, header: EasyTierPacketHeader, payload: Uint8Array, frame: ArrayBuffer): Promise<boolean> {
+    if (!this.sessionActive(session)) return true;
     const targetIsEdge = header.toPeerId === 0 || header.toPeerId === EDGE_PEER_ID;
     let body = payload;
     if ((header.flags & 1) === 1) {
@@ -416,6 +474,8 @@ export class RelayRoom implements DurableObject {
         return targetIsEdge;
       }
     }
+
+    if (!this.sessionActive(session)) return true;
 
     let packet: RpcPacket;
     try {
@@ -530,6 +590,7 @@ export class RelayRoom implements DurableObject {
     const key = rpcPacketMergerKey(direction, packet);
     let merger = session.rpcMergers.get(key);
     if (!merger) {
+      if (session.rpcMergers.size >= MAX_RPC_MERGERS_PER_SESSION) throw new Error('RPC merger limit exceeded');
       merger = new RpcPacketMerger();
       session.rpcMergers.set(key, merger);
     }
@@ -547,16 +608,22 @@ export class RelayRoom implements DurableObject {
   private forwardOrRecordUnroutable(session: Session, header: EasyTierPacketHeader, frame: ArrayBuffer): void {
     const targetSessionId = header.toPeerId ? this.peers.get(header.toPeerId) : undefined;
     const target = targetSessionId ? this.sessions.get(targetSessionId) : undefined;
-    if (!target || target.sessionId === session.sessionId) {
+    if (!target || target.sessionId === session.sessionId || target.roomId !== session.roomId
+      || !this.sessionActive(target) || !this.sessionActive(session)
+      || this.networkConfigFor(session.roomId).secret && (!session.handshakeAccepted || !target.handshakeAccepted)) {
       this.traffic.unroutablePackets += 1;
       this.addEvent(session.roomId, 'packet_unroutable', `packet type ${header.packetType} to peer ${header.toPeerId || 'unknown'} was not forwarded`, session);
       this.queueDirectorySync(session.roomId);
       return;
     }
-    this.emitFrame(target, frame);
-    this.traffic.forwardedPackets += 1;
-    this.addEvent(session.roomId, 'packet_forwarded', `packet type ${header.packetType} forwarded to peer ${header.toPeerId}`, session);
-    this.queueDirectorySync(session.roomId);
+    if (!this.emitFrame(target, frame, () => {
+      this.traffic.forwardedPackets += 1;
+      this.addEvent(session.roomId, 'packet_forwarded', `packet type ${header.packetType} forwarded to peer ${header.toPeerId}`, session);
+      this.queueDirectorySync(session.roomId);
+    })) {
+      this.traffic.unroutablePackets += 1;
+      return;
+    }
   }
 
   private async sendRpcResponse(session: Session, toPeerId: number, decoded: DecodedEasyTierRpc, responseBody: Uint8Array): Promise<void> {
@@ -566,8 +633,8 @@ export class RelayRoom implements DurableObject {
     }
   }
 
-  private async sendRpcRequest(session: Session, toPeerId: number, descriptor: DecodedEasyTierRpc['descriptor'], requestBody: Uint8Array): Promise<bigint> {
-    const transactionId = randomU64();
+  private async sendRpcRequest(session: Session, toPeerId: number, descriptor: DecodedEasyTierRpc['descriptor'], requestBody: Uint8Array, transactionId = randomU64()): Promise<bigint> {
+    if (!this.sessionActive(session)) throw new Error('RPC session is not active');
     const domainName = session.networkName ?? this.expectedNetworkName(session.roomId);
     const payloads = buildRpcRequestPayloads({
       fromPeer: EDGE_PEER_ID,
@@ -585,6 +652,7 @@ export class RelayRoom implements DurableObject {
   }
 
   private async sendRpcPayload(session: Session, toPeerId: number, packetType: EasyTierPacketType.RpcReq | EasyTierPacketType.RpcResp, plaintext: Uint8Array): Promise<void> {
+    if (!this.sessionActive(session)) throw new Error('RPC session is not active');
     let payload = plaintext;
     const declaredLen = plaintext.length;
     let flags = 0;
@@ -592,7 +660,7 @@ export class RelayRoom implements DurableObject {
       payload = await encryptAesGcm(plaintext, session.keys.key128);
       flags = 1;
     }
-    this.sendFrame(session, toPeerId, packetType, payload, flags, declaredLen);
+    if (!this.sessionActive(session) || !this.sendFrame(session, toPeerId, packetType, payload, flags, declaredLen)) throw new Error('RPC session transport is unavailable');
   }
 
   private rpcPayloadBudget(session: Session): number | undefined {
@@ -601,44 +669,91 @@ export class RelayRoom implements DurableObject {
   }
 
   private async bootstrapControlPlane(session: Session, toPeerId: number): Promise<void> {
-    if (!session.handshakeAccepted || !session.keys || !toPeerId) return;
+    if (!this.sessionActive(session) || !session.handshakeAccepted || !session.keys || !toPeerId) return;
     await this.pushRouteUpdateTo(session, toPeerId, undefined, true);
     await this.sendRpcRequest(session, toPeerId, peerCenterDescriptor(2, session.networkName ?? this.expectedNetworkName(session.roomId)), encodeGetGlobalPeerMapRequest(0n));
     this.addEvent(session.roomId, 'rpc_seen', `peer center global map requested from peer ${toPeerId}`, session);
   }
 
-  private sendFrame(session: Session, toPeerId: number, packetType: EasyTierPacketType, payload: Uint8Array, flags = 0, declaredLen = payload.length): void {
-    if (!toPeerId) return;
+  private sendFrame(session: Session, toPeerId: number, packetType: EasyTierPacketType, payload: Uint8Array, flags = 0, declaredLen = payload.length): boolean {
+    if (!toPeerId) return false;
     const frame = createEasyTierFrame({ fromPeerId: EDGE_PEER_ID, toPeerId, packetType, flags, forwardCounter: 1, reserved: 0, len: declaredLen }, payload);
-    this.emitFrame(session, frame);
+    return this.emitFrame(session, frame);
   }
 
-  private emitFrame(session: Session, frame: Uint8Array | ArrayBuffer): void {
+  private emitFrame(session: Session, frame: Uint8Array | ArrayBuffer, onSent?: () => void): boolean {
+    if (!this.sessionActive(session)) return false;
     const bytes = frame instanceof Uint8Array ? frame : new Uint8Array(frame);
+    if (session.transportKind === 'tcp-outbound' && bytes.byteLength > EASYTIER_TCP_MTU_BYTES) {
+      this.addEvent(session.roomId, 'limit_exceeded', 'tcp-outbound send skipped; frame exceeds transport limit', session);
+      return false;
+    }
+    if (!this.reserveQueue(session, 'write', bytes.byteLength)) return false;
     session.writeQueue = session.writeQueue.then(async () => {
+      if (!this.sessionActive(session)) { if (onSent) this.traffic.unroutablePackets += 1; return; }
       await session.sendRawFrame(bytes);
       session.txBytes += bytes.byteLength;
       session.txPackets += 1;
       this.traffic.txBytes += bytes.byteLength;
       this.traffic.txPackets += 1;
+      onSent?.();
     }).catch((error) => {
+      if (onSent) this.traffic.unroutablePackets += 1;
       if (error instanceof RangeError && error.message.includes('too large')) {
         this.addEvent(session.roomId, 'limit_exceeded', `${session.transportKind} send skipped; frame exceeds transport limit`, session);
         return;
       }
-      this.addEvent(session.roomId, 'decode_error', `${session.transportKind} send failed`, session);
-      this.disconnect(session);
-    });
+      if (this.sessionActive(session)) {
+        this.addEvent(session.roomId, 'decode_error', `${session.transportKind} send failed`, session);
+        this.closeSessionTransport(session, 1011, 'transport send failed');
+      }
+    }).finally(() => this.releaseQueue(session, 'write', bytes.byteLength));
     this.state.waitUntil(session.writeQueue);
+    return true;
+  }
+
+  private sessionActive(session: Session): boolean {
+    return !session.retired && this.sessions.get(session.sessionId) === session && session.isTransportOpen();
+  }
+
+  private reserveQueue(session: Session, direction: 'read' | 'write', bytes: number): boolean {
+    const byteKey = direction === 'read' ? 'queuedReadBytes' : 'queuedWriteBytes';
+    const frameKey = direction === 'read' ? 'queuedReadFrames' : 'queuedWriteFrames';
+    if ((session[byteKey] ?? 0) + bytes > RELAY_QUEUE_LIMITS.sessionBytes
+      || (session[frameKey] ?? 0) + 1 > RELAY_QUEUE_LIMITS.sessionFrames) {
+      this.addEvent(session.roomId, 'limit_exceeded', `${direction} queue limit exceeded`, session);
+      this.closeSessionTransport(session, 1008, 'queue limit exceeded');
+      return false;
+    }
+    if (this[byteKey] + bytes > RELAY_QUEUE_LIMITS.roomBytes || this[frameKey] + 1 > RELAY_QUEUE_LIMITS.roomFrames) {
+      this.addEvent(session.roomId, 'limit_exceeded', `${direction} room queue limit exceeded; frame dropped`, session);
+      return false;
+    }
+    session[byteKey] = (session[byteKey] ?? 0) + bytes;
+    session[frameKey] = (session[frameKey] ?? 0) + 1;
+    this[byteKey] += bytes;
+    this[frameKey] += 1;
+    return true;
+  }
+
+  private releaseQueue(session: Session, direction: 'read' | 'write', bytes: number): void {
+    const byteKey = direction === 'read' ? 'queuedReadBytes' : 'queuedWriteBytes';
+    const frameKey = direction === 'read' ? 'queuedReadFrames' : 'queuedWriteFrames';
+    session[byteKey] = Math.max(0, (session[byteKey] ?? 0) - bytes);
+    session[frameKey] = Math.max(0, (session[frameKey] ?? 0) - 1);
+    this[byteKey] = Math.max(0, this[byteKey] - bytes);
+    this[frameKey] = Math.max(0, this[frameKey] - 1);
   }
 
   private applySyncRouteInfo(session: Session, req: SyncRouteInfoRequest): boolean {
     const now = new Date().toISOString();
     let changed = false;
     for (const info of req.peerInfos) {
-      if (!info.peerId) continue;
+      if (!info.peerId || info.peerId === EDGE_PEER_ID) continue;
       const snapshot = routePeerSnapshot(info, now, req.myPeerId);
       const previous = this.rawRoutePeerInfos.get(info.peerId);
+      if (previous && !this.unconfirmedRoutePeerIds.has(info.peerId) && (info.version ?? 0) <= (previous.version ?? 0)) continue;
+      this.unconfirmedRoutePeerIds.delete(info.peerId);
       if (!previous || routePeerInfoSignature(previous) !== routePeerInfoSignature(info)) changed = true;
       this.rawRoutePeerInfos.set(info.peerId, cloneRoutePeerInfo(info));
       this.routePeers.set(info.peerId, snapshot);
@@ -648,12 +763,20 @@ export class RelayRoom implements DurableObject {
       if (session.peerId === info.peerId) applyRouteFields(session, snapshot);
     }
     if (req.connBitmap || req.connPeerList) {
-      const nextEdges = req.connPeerList ? edgesFromConnPeerList(req.connPeerList) : edgesFromConnBitmap(req.connBitmap!);
-      const nextPeerIds = req.connPeerList ? peerIdsFromConnPeerList(req.connPeerList) : peerIdsFromConnBitmap(req.connBitmap!);
-      if (topologyEdgeSignature(nextEdges) !== topologyEdgeSignature(this.connBitmapEdges)) changed = true;
-      if (peerIdSignature(nextPeerIds) !== peerIdSignature(this.connBitmapPeerIds)) changed = true;
-      this.connBitmapEdges = nextEdges;
-      this.connBitmapPeerIds = nextPeerIds;
+      const edges = req.connPeerList ? edgesFromConnPeerList(req.connPeerList) : edgesFromConnBitmap(req.connBitmap!);
+      const owners = req.connPeerList ? req.connPeerList.peerConnInfos.flatMap((row) => row.peerId ? [row.peerId] : []) : req.connBitmap!.peerIds;
+      for (const owner of owners) {
+        if (!owner.peerId || owner.peerId === EDGE_PEER_ID) continue;
+        const previous = this.connRows.get(owner.peerId);
+        if (previous && !this.unconfirmedConnPeerIds.has(owner.peerId) && owner.version <= previous.version) continue;
+        this.unconfirmedConnPeerIds.delete(owner.peerId);
+        this.connRows.set(owner.peerId, {
+          peerId: owner.peerId, version: owner.version, lastSeen: now, sourcePeerId: req.myPeerId ?? session.peerId,
+          connectedPeerIds: sanitizePeerIds(edges.filter((edge) => edge.fromPeerId === owner.peerId).map((edge) => edge.toPeerId)),
+        });
+        changed = true;
+      }
+      this.rebuildConnectionViews();
     }
     if (changed) this.routeVersion += 1;
     this.topologyUpdatedAt = now;
@@ -667,23 +790,32 @@ export class RelayRoom implements DurableObject {
     const now = Date.now();
     if (!force && session.lastRoutePushAt && now - session.lastRoutePushAt < ROUTE_PUSH_MIN_MS) return;
     const routeSession = ensureOspfRouteSession(session);
+    prunePendingRouteSyncs(routeSession, now);
+    if (!this.sessionActive(session) || routeSession.pendingRouteSyncs.size >= MAX_PENDING_ROUTE_SYNCS) return;
     const request = this.buildSyncRouteInfoRequest(session, toPeerId, force);
     const hasConnInfo = Boolean(request.connBitmap || request.connPeerList);
     if (request.peerInfos.length === 0 && !hasConnInfo && !routeSession.needSyncInitiatorInfo) return;
-    const transactionId = await this.sendRpcRequest(session, toPeerId, descriptor, encodeSyncRouteInfoRequest(request));
+    const transactionId = randomU64();
     routeSession.pendingRouteSyncs.set(transactionId.toString(), {
+      sentAt: now,
       peerInfos: request.peerInfos.map(cloneRoutePeerInfo),
       connBitmap: request.connBitmap,
       connPeerList: request.connPeerList,
     });
     session.lastRoutePushAt = now;
+    try { await this.sendRpcRequest(session, toPeerId, descriptor, encodeSyncRouteInfoRequest(request), transactionId); }
+    catch (error) {
+      routeSession.pendingRouteSyncs.delete(transactionId.toString());
+      if (this.sessionActive(session)) routeSession.needSyncInitiatorInfo = true;
+      throw error;
+    }
     this.addEvent(session.roomId, 'rpc_seen', `route update pushed to peer ${toPeerId}`, session);
   }
 
   private async broadcastRouteUpdates(source: Session, descriptor: DecodedEasyTierRpc['descriptor']): Promise<void> {
     const updates: Promise<void>[] = [];
     for (const session of this.sessions.values()) {
-      if (session.sessionId === source.sessionId || !session.peerId || !session.handshakeAccepted) continue;
+      if (session.roomId !== source.roomId || session.sessionId === source.sessionId || !session.peerId || !session.handshakeAccepted || !this.sessionActive(session)) continue;
       updates.push(this.pushRouteUpdateTo(session, session.peerId, descriptor, true));
     }
     await Promise.all(updates);
@@ -694,16 +826,19 @@ export class RelayRoom implements DurableObject {
     const peerInfos = selectRoutePeerInfosForSync(routeSession, this.routePeerInfosForUpdate(), targetPeerId, force);
     const peerIds = buildRouteUpdatePeerIds(
       targetPeerId,
-      this.rawRoutePeerInfos.keys(),
+      [...this.rawRoutePeerInfos.keys()].filter((peerId) => !this.unconfirmedRoutePeerIds.has(peerId))
+        .concat([...this.connRows.values()].filter((row) => !this.unconfirmedConnPeerIds.has(row.peerId)).flatMap((row) => [row.peerId, ...row.connectedPeerIds])),
       this.peers.keys(),
-      this.peerCenterLastSeen().keys(),
+      this.buildPeerCenterGlobalMap().keys(),
     );
     return {
       myPeerId: EDGE_PEER_ID,
       mySessionId: routeSession.mySessionId,
       isInitiator: routeSession.weAreInitiator,
       peerInfos,
-      connBitmap: peerIds.length > 0 ? buildRouteConnBitmapForUpdate(peerIds, this.routeVersion, this.connBitmapEdges, new Set(this.peers.keys())) : undefined,
+      connBitmap: peerIds.length > 0 ? buildRouteConnBitmapForUpdate(peerIds, this.routeVersion,
+        this.connBitmapEdges.filter((edge) => !this.unconfirmedConnPeerIds.has(edge.fromPeerId)), new Set(this.peers.keys()),
+        new Map([...this.connRows].filter(([peerId]) => !this.unconfirmedConnPeerIds.has(peerId)).map(([peerId, row]) => [peerId, row.version]))) : undefined,
     };
   }
 
@@ -716,10 +851,11 @@ export class RelayRoom implements DurableObject {
       hostname: 'edgetier-worker',
       version: this.routeVersion,
       easytierVersion: 'edgetier-worker',
-      networkLength: firstNetworkLength(this.rawRoutePeerInfos) ?? 24,
+      networkLength: this.confirmedNetworkLength() ?? 24,
     });
     for (const [peerId, info] of this.rawRoutePeerInfos.entries()) {
-      infos.set(peerId, cloneRoutePeerInfo({ ...info, version: info.version ?? this.routeVersion }));
+      if (this.unconfirmedRoutePeerIds.has(peerId)) continue;
+      infos.set(peerId, cloneRoutePeerInfo({ ...info, version: info.version ?? 0 }));
     }
     return [...infos.values()].sort((a, b) => a.peerId - b.peerId);
   }
@@ -729,6 +865,7 @@ export class RelayRoom implements DurableObject {
     if (!sourcePeerId) return;
     const now = new Date().toISOString();
     this.peerCenter.set(sourcePeerId, { directPeers: cloneDirectPeers(req.peerInfos), lastSeen: now });
+    this.unconfirmedPeerCenterIds.delete(sourcePeerId);
     this.peerCenterEdges = edgesFromPeerCenter(this.peerCenter);
     this.topologyUpdatedAt = now;
     this.requestRouteInfoResyncIfNeeded(session.roomId);
@@ -740,6 +877,7 @@ export class RelayRoom implements DurableObject {
     const now = new Date().toISOString();
     for (const [peerId, peerInfo] of globalPeerMap.entries()) {
       this.peerCenter.set(peerId, { directPeers: cloneDirectPeers(peerInfo), lastSeen: now });
+      this.unconfirmedPeerCenterIds.delete(peerId);
     }
     this.peerCenterEdges = edgesFromPeerCenter(this.peerCenter);
     this.topologyUpdatedAt = now;
@@ -784,6 +922,7 @@ export class RelayRoom implements DurableObject {
     };
 
     for (const [peerId, info] of this.peerCenter.entries()) {
+      if (this.unconfirmedPeerCenterIds.has(peerId)) continue;
       const peerInfo = ensure(peerId);
       for (const [toPeerId, directInfo] of info.directPeers.entries()) {
         peerInfo.directPeers.set(toPeerId, { latencyMs: directInfo.latencyMs });
@@ -791,7 +930,7 @@ export class RelayRoom implements DurableObject {
       }
     }
 
-    for (const peerId of this.routePeers.keys()) ensure(peerId);
+    for (const peerId of this.routePeers.keys()) if (!this.unconfirmedRoutePeerIds.has(peerId)) ensure(peerId);
     for (const session of this.sessions.values()) {
       if (!session.peerId) continue;
       ensure(session.peerId).directPeers.set(EDGE_PEER_ID, { latencyMs: 0 });
@@ -805,8 +944,10 @@ export class RelayRoom implements DurableObject {
     if (session.peerId && session.peerId !== peerId && this.peers.get(session.peerId) === session.sessionId) {
       this.peers.delete(session.peerId);
     }
+    const alreadyConnected = this.peers.has(peerId);
     session.peerId = peerId;
     this.peers.set(peerId, session.sessionId);
+    if (!alreadyConnected) this.routeVersion += 1;
   }
 
   private bindPeerFromFrame(session: Session, header: EasyTierPacketHeader): void {
@@ -825,10 +966,20 @@ export class RelayRoom implements DurableObject {
   private disconnect(session: Session): void {
     if (!this.sessions.has(session.sessionId)) return;
     const peerId = session.peerId;
+    session.retired = true;
+    session.handshakeAccepted = false;
+    session.keys = undefined;
+    session.rpcMergers.clear();
+    session.ospfRouteSession?.pendingRouteSyncs.clear();
     this.sessions.delete(session.sessionId);
-    if (peerId && this.peers.get(peerId) === session.sessionId) this.peers.delete(peerId);
-    const peerCenterChanged = peerId ? this.removePeerCenterPeer(peerId) : false;
-    const routeStateChanged = peerId ? this.removeRouteStateForSource(peerId) : false;
+    const survivor = peerId ? [...this.sessions.values()].reverse().find((candidate) => candidate.peerId === peerId
+      && candidate.roomId === session.roomId && candidate.handshakeAccepted && this.sessionActive(candidate)) : undefined;
+    if (peerId && this.peers.get(peerId) === session.sessionId) {
+      if (survivor) this.peers.set(peerId, survivor.sessionId);
+      else { this.peers.delete(peerId); this.routeVersion += 1; }
+    }
+    const peerCenterChanged = peerId && !survivor ? this.removePeerCenterPeer(peerId) : false;
+    const routeStateChanged = peerId && !survivor ? this.removeRouteStateForSource(peerId) : false;
     const topologyChanged = peerCenterChanged || routeStateChanged;
     session.connected = false;
     this.addEvent(session.roomId, 'disconnected', `${session.transportKind} disconnected`, session);
@@ -893,10 +1044,11 @@ export class RelayRoom implements DurableObject {
   }
 
   private outboundRoomIdsForMaintenance(): string[] {
-    return outboundRoomIdsForMaintenance(this.env, this.knownOutboundRoomIds);
+    return this.roomId && resolveOutboundTcpPeers(this.env, this.roomId).length > 0 ? [this.roomId] : [];
   }
 
   private async ensureConfiguredOutboundTcp(roomId: string): Promise<void> {
+    if (roomId !== this.roomId) return;
     const peers = resolveOutboundTcpPeers(this.env, roomId);
     if (peers.length === 0) {
       if (this.knownOutboundRoomIds.delete(roomId)) this.queueControlStatePersist(true);
@@ -967,8 +1119,7 @@ export class RelayRoom implements DurableObject {
       sendRawFrame: (frame) => writer.write(encodeTcpTunnelFrame(frame)),
       closeTransport: async () => {
         open = false;
-        await writer.close().catch(() => undefined);
-        await socket.close().catch(() => undefined);
+        await Promise.all([writer.abort().catch(() => undefined), socket.close().catch(() => undefined)]);
       },
       isTransportOpen: () => open,
       invalidPackets: 0,
@@ -1022,7 +1173,7 @@ export class RelayRoom implements DurableObject {
         for (const frame of frames) await this.onEasyTierFrame(session, frame);
       }
     } finally {
-      this.disconnect(session);
+      this.closeSessionTransport(session, 1000, 'outbound tcp read ended');
     }
   }
 
@@ -1031,7 +1182,10 @@ export class RelayRoom implements DurableObject {
   }
 
   private closeSessionTransport(session: Session, code?: number, reason?: string): void {
-    this.state.waitUntil(Promise.resolve(session.closeTransport(code, reason)).catch(() => undefined));
+    if (session.closeStarted) return;
+    session.closeStarted = true;
+    this.disconnect(session);
+    this.state.waitUntil(Promise.resolve().then(() => session.closeTransport(code, reason)).catch(() => undefined));
   }
 
   private queueOutboundTcpReconnect(roomId: string): void {
@@ -1047,6 +1201,10 @@ export class RelayRoom implements DurableObject {
       this.rawRoutePeerInfos = new Map();
       this.connBitmapPeerIds = [];
       this.connBitmapEdges = [];
+      this.connRows.clear();
+      this.unconfirmedRoutePeerIds.clear();
+      this.unconfirmedConnPeerIds.clear();
+      this.unconfirmedPeerCenterIds.clear();
       this.peerCenter = new Map();
       this.peerCenterEdges = [];
       this.topologyUpdatedAt = undefined;
@@ -1119,6 +1277,12 @@ export class RelayRoom implements DurableObject {
       outboundPeerUri: _outboundPeerUri,
       outboundHandshakeSent: _outboundHandshakeSent,
       routeInfoResyncRequestedAt: _routeInfoResyncRequestedAt,
+      retired: _retired,
+      closeStarted: _closeStarted,
+      queuedReadBytes: _queuedReadBytes,
+      queuedReadFrames: _queuedReadFrames,
+      queuedWriteBytes: _queuedWriteBytes,
+      queuedWriteFrames: _queuedWriteFrames,
       ...peer
     }) => ({ ...peer, latencyMs: peer.peerId ? peerLatencies.get(peer.peerId) ?? peer.latencyMs : peer.latencyMs }));
     const livePeerIds = new Set(livePeers.map((peer) => peer.peerId).filter((peerId): peerId is number => peerId !== undefined));
@@ -1180,7 +1344,7 @@ export class RelayRoom implements DurableObject {
       proxyCidrs: [],
       easytierVersion: 'edgetier-worker',
       routeVersion: this.routeVersion,
-      networkLength: firstNetworkLength(this.rawRoutePeerInfos) ?? 24,
+      networkLength: this.confirmedNetworkLength() ?? 24,
       latencyMs: 0,
       connected: this.sessions.size > 0,
       connectedAt: this.events[0]?.timestamp ?? lastActivity ?? new Date().toISOString(),
@@ -1212,7 +1376,7 @@ export class RelayRoom implements DurableObject {
         proxyCidrs: [],
         easytierVersion: 'edgetier-worker',
         routeVersion: this.routeVersion,
-        networkLength: firstNetworkLength(this.rawRoutePeerInfos) ?? 24,
+        networkLength: this.confirmedNetworkLength() ?? 24,
         lastSeen: this.topologyUpdatedAt ?? this.events.at(-1)?.timestamp ?? new Date().toISOString(),
       });
     }
@@ -1317,12 +1481,17 @@ export class RelayRoom implements DurableObject {
     return resolveNetworkConfig(this.env, roomId);
   }
 
+  private confirmedNetworkLength(): number | undefined {
+    return firstNetworkLength(new Map([...this.rawRoutePeerInfos].filter(([peerId]) => !this.unconfirmedRoutePeerIds.has(peerId))));
+  }
+
   private expectedNetworkName(roomId: string): string {
     return this.networkConfigFor(roomId).networkName;
   }
 
   private removePeerCenterPeer(peerId: number): boolean {
     let changed = this.peerCenter.delete(peerId);
+    this.unconfirmedPeerCenterIds.delete(peerId);
     for (const info of this.peerCenter.values()) {
       if (info.directPeers.delete(peerId)) changed = true;
     }
@@ -1337,29 +1506,49 @@ export class RelayRoom implements DurableObject {
       if (routePeerId === peerId || peer.sourcePeerId === peerId) {
         this.routePeers.delete(routePeerId);
         this.rawRoutePeerInfos.delete(routePeerId);
+        this.unconfirmedRoutePeerIds.delete(routePeerId);
         changed = true;
       }
     }
-    if (changed) this.pruneTopologyEdgesToKnownPeers();
+    for (const [owner, row] of this.connRows) {
+      if (!this.peers.has(owner) && (owner === peerId || row.sourcePeerId === peerId)) {
+        this.connRows.delete(owner);
+        this.unconfirmedConnPeerIds.delete(owner);
+        changed = true;
+      }
+    }
+    if (changed) { this.rebuildConnectionViews(); this.pruneTopologyEdgesToKnownPeers(); }
     return changed;
   }
 
   private pruneStaleRouteState(now = Date.now()): boolean {
     let changed = false;
     const livePeerIds = new Set(this.peers.keys());
+    const noLivePeers = new Set<number>();
     for (const [peerId, peer] of this.routePeers.entries()) {
-      if (shouldPruneRoutePeer(peer, livePeerIds, now)) {
+      if (shouldPruneRoutePeer(peer, this.unconfirmedRoutePeerIds.has(peerId) ? noLivePeers : livePeerIds, now)) {
         this.routePeers.delete(peerId);
         this.rawRoutePeerInfos.delete(peerId);
+        this.unconfirmedRoutePeerIds.delete(peerId);
         changed = true;
       }
     }
 
     for (const [peerId, info] of this.peerCenter.entries()) {
-      if (this.peers.has(peerId)) continue;
+      if (this.peers.has(peerId) && !this.unconfirmedPeerCenterIds.has(peerId)) continue;
       const lastSeen = Date.parse(info.lastSeen);
       if (!Number.isFinite(lastSeen) || now - lastSeen > ROUTE_STATE_TTL_MS) {
         this.peerCenter.delete(peerId);
+        this.unconfirmedPeerCenterIds.delete(peerId);
+        changed = true;
+      }
+    }
+
+    for (const [peerId, row] of this.connRows) {
+      if (!this.unconfirmedConnPeerIds.has(peerId) && (this.peers.has(peerId) || row.sourcePeerId && this.peers.has(row.sourcePeerId))) continue;
+      if (!Number.isFinite(Date.parse(row.lastSeen)) || now - Date.parse(row.lastSeen) > ROUTE_STATE_TTL_MS) {
+        this.connRows.delete(peerId);
+        this.unconfirmedConnPeerIds.delete(peerId);
         changed = true;
       }
     }
@@ -1374,11 +1563,19 @@ export class RelayRoom implements DurableObject {
         }
       }
       this.peerCenterEdges = edgesFromPeerCenter(this.peerCenter);
+      this.rebuildConnectionViews();
       this.pruneTopologyEdgesToKnownPeers();
       this.routeVersion += 1;
       this.topologyUpdatedAt = new Date(now).toISOString();
     }
     return changed;
+  }
+
+  private rebuildConnectionViews(): void {
+    this.connBitmapPeerIds = sanitizePeerIds([...this.connRows.values()].flatMap((row) => [row.peerId, ...row.connectedPeerIds]));
+    this.connBitmapEdges = [...this.connRows.values()].flatMap((row) => row.connectedPeerIds
+      .filter((peerId) => peerId !== row.peerId)
+      .map((peerId): TopologyEdge => ({ fromPeerId: row.peerId, toPeerId: peerId, source: 'conn_bitmap' }))).sort(compareTopologyEdges);
   }
 
   private pruneTopologyEdgesToKnownPeers(): void {
@@ -1389,6 +1586,10 @@ export class RelayRoom implements DurableObject {
     for (const info of this.peerCenter.values()) {
       for (const peerId of info.directPeers.keys()) known.add(peerId);
     }
+    for (const row of this.connRows.values()) {
+      known.add(row.peerId);
+      for (const peerId of row.connectedPeerIds) known.add(peerId);
+    }
     this.connBitmapPeerIds = this.connBitmapPeerIds.filter((peerId) => known.has(peerId));
     this.connBitmapEdges = this.connBitmapEdges.filter((edge) => known.has(edge.fromPeerId) && known.has(edge.toPeerId));
     this.peerCenterEdges = this.peerCenterEdges.filter((edge) => known.has(edge.fromPeerId) && known.has(edge.toPeerId));
@@ -1396,6 +1597,8 @@ export class RelayRoom implements DurableObject {
 
   private runHeartbeatMaintenance(now = Date.now()): void {
     for (const session of [...this.sessions.values()]) {
+      this.pruneRpcMergers(session, now);
+      if (session.ospfRouteSession) prunePendingRouteSyncs(session.ospfRouteSession, now);
       if (!session.isTransportOpen()) {
         this.disconnect(session);
         continue;
@@ -1429,7 +1632,11 @@ export class RelayRoom implements DurableObject {
 
   private async loadControlState(): Promise<void> {
     const stored = await this.state.storage.get<PersistedControlState>(CONTROL_STATE_STORAGE_KEY);
-    this.knownOutboundRoomIds = new Set(outboundRoomIdsForMaintenance(this.env, stored?.outboundRoomIds ?? []));
+    const namedRoom = this.state.id?.name;
+    this.roomId = namedRoom && ROOM_NAME_PATTERN.test(namedRoom) ? namedRoom
+      : stored?.roomId && ROOM_NAME_PATTERN.test(stored.roomId) ? stored.roomId : undefined;
+    // Legacy outboundRoomIds could contain every configured room; it is not ownership evidence.
+    this.knownOutboundRoomIds = new Set(this.outboundRoomIdsForMaintenance());
     if (!stored) return;
     this.routeVersion = Math.max(this.routeVersion, safeU32(stored.routeVersion, this.routeVersion));
     this.topologyUpdatedAt = typeof stored.topologyUpdatedAt === 'string' ? stored.topologyUpdatedAt : undefined;
@@ -1441,6 +1648,17 @@ export class RelayRoom implements DurableObject {
       .map((info) => [info.peerId, cloneRoutePeerInfo({ ...info, proxyCidrs: Array.isArray(info.proxyCidrs) ? info.proxyCidrs : [] })]));
     this.connBitmapEdges = sanitizeTopologyEdges(stored.connBitmapEdges ?? []);
     this.connBitmapPeerIds = sanitizePeerIds(stored.connBitmapPeerIds ?? []);
+    this.connRows = new Map((stored.connRows ?? []).filter((row) => Number.isInteger(row.peerId) && row.peerId > 0 && row.peerId !== EDGE_PEER_ID)
+      .map((row) => [row.peerId, { ...row, version: safeU32(row.version, 0), connectedPeerIds: sanitizePeerIds(row.connectedPeerIds ?? []) }]));
+    if (!stored.connRows) {
+      // Preserve old observer edges without inventing an authoritative owner version.
+      for (const peerId of sanitizePeerIds([...this.connBitmapPeerIds, ...this.connBitmapEdges.flatMap((edge) => [edge.fromPeerId, edge.toPeerId])])) {
+        if (peerId === EDGE_PEER_ID) continue;
+        this.connRows.set(peerId, { peerId, version: 0, lastSeen: stored.topologyUpdatedAt ?? new Date().toISOString(),
+          connectedPeerIds: this.connBitmapEdges.filter((edge) => edge.fromPeerId === peerId).map((edge) => edge.toPeerId) });
+      }
+    }
+    this.rebuildConnectionViews();
     this.peerCenter = new Map();
     for (const entry of stored.peerCenter ?? []) {
       if (!Number.isInteger(entry.peerId) || entry.peerId <= 0) continue;
@@ -1452,6 +1670,10 @@ export class RelayRoom implements DurableObject {
       });
     }
     this.peerCenterEdges = edgesFromPeerCenter(this.peerCenter);
+    const scoped = stored.roomId !== undefined && stored.roomId === this.roomId;
+    this.unconfirmedRoutePeerIds = new Set(scoped ? stored.unconfirmedRoutePeerIds ?? [] : this.rawRoutePeerInfos.keys());
+    this.unconfirmedConnPeerIds = new Set(scoped ? stored.unconfirmedConnPeerIds ?? [] : this.connRows.keys());
+    this.unconfirmedPeerCenterIds = new Set(scoped ? stored.unconfirmedPeerCenterIds ?? [] : this.peerCenter.keys());
     if (this.pruneStaleRouteState()) await this.persistControlState();
   }
 
@@ -1476,11 +1698,16 @@ export class RelayRoom implements DurableObject {
     this.lastControlStatePersist = Date.now();
     await this.state.storage.put<PersistedControlState>(CONTROL_STATE_STORAGE_KEY, {
       routeVersion: this.routeVersion,
+      roomId: this.roomId,
       ...(this.topologyUpdatedAt ? { topologyUpdatedAt: this.topologyUpdatedAt } : {}),
       routePeers: [...this.routePeers.values()],
       rawRoutePeerInfos: [...this.rawRoutePeerInfos.values()].map(cloneRoutePeerInfo),
       connBitmapPeerIds: [...this.connBitmapPeerIds],
       connBitmapEdges: [...this.connBitmapEdges],
+      connRows: [...this.connRows.values()],
+      unconfirmedRoutePeerIds: [...this.unconfirmedRoutePeerIds],
+      unconfirmedConnPeerIds: [...this.unconfirmedConnPeerIds],
+      unconfirmedPeerCenterIds: [...this.unconfirmedPeerCenterIds],
       peerCenter: [...this.peerCenter.entries()].map(([peerId, info]) => ({
         peerId,
         lastSeen: info.lastSeen,
@@ -1662,6 +1889,7 @@ export function applyOspfRouteSessionResponse(
   remotePeerId: number,
   now = Date.now(),
 ): boolean {
+  if (!pending || pending.sentAt !== undefined && now - pending.sentAt >= ROUTE_SYNC_TIMEOUT_MS) return false;
   if (response.error !== undefined) {
     state.needSyncInitiatorInfo = true;
     return false;
@@ -1675,6 +1903,15 @@ export function applyOspfRouteSessionResponse(
   state.needSyncInitiatorInfo = false;
   state.lastSyncSuccessAt = now;
   return true;
+}
+
+export function prunePendingRouteSyncs(state: OspfRouteSessionState, now = Date.now()): void {
+  for (const [id, pending] of state.pendingRouteSyncs) {
+    if (pending.sentAt === undefined || now - pending.sentAt >= ROUTE_SYNC_TIMEOUT_MS) {
+      state.pendingRouteSyncs.delete(id);
+      state.needSyncInitiatorInfo = true;
+    }
+  }
 }
 
 export function selectRoutePeerInfosForSync(
@@ -1865,7 +2102,7 @@ function firstNetworkLength(infos: Map<number, RoutePeerInfo>): number | undefin
   return undefined;
 }
 
-export function buildRouteConnBitmapForUpdate(peerIds: number[], version: number, observedEdges: TopologyEdge[], livePeerIds: Set<number>): RouteConnBitmap {
+export function buildRouteConnBitmapForUpdate(peerIds: number[], version: number, observedEdges: TopologyEdge[], livePeerIds: Set<number>, ownerVersions: Map<number, number> = new Map()): RouteConnBitmap {
   const orderedPeerIds = [...new Set(peerIds)].filter((peerId) => peerId > 0).sort((a, b) => a - b);
   const size = orderedPeerIds.length;
   const bitmap = new Uint8Array(Math.ceil((size * size) / 8));
@@ -1881,11 +2118,16 @@ export function buildRouteConnBitmapForUpdate(peerIds: number[], version: number
   for (const peerId of orderedPeerIds) setBit(peerId, peerId);
   for (const peerId of livePeerIds) {
     setBit(EDGE_PEER_ID, peerId);
-    setBit(peerId, EDGE_PEER_ID);
   }
-  for (const edge of observedEdges) setBit(edge.fromPeerId, edge.toPeerId);
+  for (const edge of observedEdges) if (edge.fromPeerId !== EDGE_PEER_ID) setBit(edge.fromPeerId, edge.toPeerId);
 
-  return { peerIds: orderedPeerIds.map((peerId) => ({ peerId, version })), bitmap };
+  return { peerIds: orderedPeerIds.map((peerId) => ({ peerId, version: peerId === EDGE_PEER_ID ? version : ownerVersions.get(peerId) ?? 0 })), bitmap };
+}
+
+function messageByteLength(data: unknown): number | undefined {
+  if (typeof data === 'string') return new TextEncoder().encode(data).byteLength;
+  if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) return data.byteLength;
+  return undefined;
 }
 
 export function buildRouteUpdatePeerIds(
@@ -2263,13 +2505,14 @@ function parseNetworkSecretMap(raw: string | undefined): Map<string, string> {
 }
 
 export function resolveOutboundTcpPeers(
-  env: Pick<Env, 'EASYTIER_PUBLIC_PEER_TCP' | 'EASYTIER_OUTBOUND_TCP_PEERS'>,
+  env: Pick<Env, 'EASYTIER_NETWORK_NAME' | 'EASYTIER_NETWORKS' | 'EASYTIER_PUBLIC_PEER_TCP' | 'EASYTIER_OUTBOUND_TCP_PEERS'>,
   roomId: string,
 ): TcpPeerAddress[] {
   if (!ROOM_NAME_PATTERN.test(roomId) || roomId === 'null' || roomId === 'undefined') return [];
   const candidates = [
     ...parseOutboundTcpPeerConfig(env.EASYTIER_OUTBOUND_TCP_PEERS, roomId),
-    ...splitPeerList(env.EASYTIER_PUBLIC_PEER_TCP),
+    // Separate alias objects cannot serve interchangeable tunnels for the same native peer ID.
+    ...(roomId === resolveDefaultRoomConfig(env).roomId ? splitPeerList(env.EASYTIER_PUBLIC_PEER_TCP) : []),
   ];
   const peers = new Map<string, TcpPeerAddress>();
   for (const candidate of candidates) {

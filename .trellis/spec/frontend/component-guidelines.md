@@ -6,6 +6,8 @@
 
 ## Overview
 
+The authorized host/DDNS integration follows [Host Management](./host-management.md). It adds credential-free host DTOs in `src/observer/host-types.ts` and one explicit fixed DDNS refresh action; historical read-only guidance below still applies to EasyTier child-node control.
+
 EdgeTier dashboard components are React components using Cloudflare Kumo for accessible UI primitives. The v0.1.1 dashboard is intentionally read-only and private-testing oriented.
 
 Use Kumo components for common UI such as tables, badges, buttons, inputs, empty states, layer cards, status indicators, tabs/sidebar, and future charts. Do not build a custom component library unless Kumo does not provide the needed primitive.

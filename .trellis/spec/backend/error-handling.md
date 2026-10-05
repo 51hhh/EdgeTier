@@ -24,7 +24,7 @@ The relay should stay available when a single packet is malformed. Protocol deco
 ```typescript
 json(data: unknown, status = 200): Response
 validRoom(roomId: string | null): roomId is string
-handleApi(request: Request, env: Env): Promise<Response | null>
+handleApi(request: Request, env: Env, session: VerifiedSession): Promise<Response | null>
 ```
 
 Public error responses:
@@ -50,7 +50,7 @@ type RelayEventType =
 
 ### 3. Contracts
 
-- API validation errors return JSON and status `400`.
+- API validation errors return JSON and status `400`. Catch `decodeURIComponent` failures at the room path boundary before calling storage; malformed percent/UTF-8 encodings must not escape as `URIError`.
 - Non-WebSocket `/ws` requests return status `426` with text `WebSocket upgrade required`.
 - Room peer limit returns status `429` with text `room peer limit exceeded`.
 - Packet-level errors do not become HTTP errors because they happen after WebSocket upgrade. They become `RelayEvent` entries and traffic counters.

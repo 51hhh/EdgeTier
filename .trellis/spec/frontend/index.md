@@ -19,6 +19,7 @@ This directory documents EdgeTier frontend conventions for the React + Vite + Cl
 | [Hook Guidelines](./hook-guidelines.md) | Polling lifecycle and custom hook extraction rules | Filled |
 | [State Management](./state-management.md) | Local polling state and server state boundaries | Filled |
 | [Quality Guidelines](./quality-guidelines.md) | Build/test/API contract quality checks | Filled |
+| [Host Management](./host-management.md) | Host/DDNS refresh and valid client export contracts | Filled |
 | [Type Safety](./type-safety.md) | Shared observer DTOs and optional field handling | Filled |
 
 ---
@@ -26,6 +27,8 @@ This directory documents EdgeTier frontend conventions for the React + Vite + Cl
 ## Pre-Development Checklist
 
 Before frontend changes:
+
+For host status, DDNS refresh or client export changes, read [Host Management](./host-management.md).
 
 1. Read [Directory Structure](./directory-structure.md) for dashboard file ownership and API contract location.
 2. Read [Component Guidelines](./component-guidelines.md) before adding UI components or Kumo usage.

@@ -1,3 +1,4 @@
+import type { ConfigProfile, HostCommand, HostSnapshot } from '../observer/host-types';
 import type { DefaultRoomResponse, DirectoryRoomSummary, OutboundTcpStatus, RelayEvent, RelayTokenResponse, RoomSnapshot, TopologySnapshot, TrafficSnapshot } from '../observer/types';
 
 export async function getDefaultRoom(): Promise<DefaultRoomResponse> {
@@ -48,6 +49,21 @@ export async function clearRoomSeed(roomId: string): Promise<void> {
 
 export async function logout(): Promise<void> {
   await fetchJson<{ ok: true }>('/api/auth/logout', { method: 'POST' });
+}
+
+export async function getHosts(signal?: AbortSignal): Promise<HostSnapshot[]> {
+  const data = await fetchJson<{ hosts: HostSnapshot[] }>('/api/hosts', { signal });
+  return data.hosts;
+}
+
+export async function getConfigProfiles(signal?: AbortSignal): Promise<ConfigProfile[]> {
+  const data = await fetchJson<{ profiles: ConfigProfile[] }>('/api/config-profiles', { signal });
+  return data.profiles;
+}
+
+export async function refreshHostDdns(hostId: string): Promise<HostCommand> {
+  const data = await fetchJson<{ command: HostCommand }>(`/api/hosts/${encodeURIComponent(hostId)}/ddns-refresh`, { method: 'POST' });
+  return data.command;
 }
 
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {

@@ -18,13 +18,15 @@ export function roomStub(env: Env, roomId: string): DurableObjectStub {
 
 export async function handleApi(request: Request, env: Env, session: VerifiedSession): Promise<Response | null> {
   const url = new URL(request.url);
-  if (url.pathname === '/api/health') return json({ ok: true, service: 'edgetier', version: '0.1.1', capabilities: ['wss-relay', 'easytier-outbound-tcp', 'easytier-handshake', 'easytier-rpc-decode', 'easytier-peer-center', 'topology-api', 'observer-api', 'dashboard', 'private-auth'] });
+  if (url.pathname === '/api/health') return json({ ok: true, service: 'edgetier', version: '0.2.1', capabilities: ['wss-relay', 'easytier-outbound-tcp', 'easytier-handshake', 'easytier-rpc-decode', 'easytier-peer-center', 'topology-api', 'observer-api', 'dashboard', 'private-auth', 'host-status', 'ddns-management', 'config-profiles'] });
   if (url.pathname === '/api/auth/me') return json({ authenticated: true, user: { username: session.username }, expiresAt: session.expiresAt });
   if (url.pathname === '/api/default-room') return json(resolveDefaultRoomConfig(env));
   if (url.pathname === '/api/rooms') return env.DIRECTORY.get(env.DIRECTORY.idFromName('global')).fetch('https://directory/');
   const match = /^\/api\/rooms\/([^/]+)(?:\/(peers|events|traffic|topology|outbound-tcp|token|test-seed))?$/.exec(url.pathname);
   if (!match) return null;
-  const roomId = decodeURIComponent(match[1]);
+  let roomId: string;
+  try { roomId = decodeURIComponent(match[1]); }
+  catch { return json({ error: 'invalid room name' }, 400); }
   if (!validRoom(roomId)) return json({ error: 'invalid room name' }, 400);
   if (match[2] === 'token') {
     if (request.method !== 'POST') return json({ error: 'method not allowed' }, 405);

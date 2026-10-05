@@ -24,3 +24,11 @@ class_name = "Directory"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["RelayRoom", "Directory"]
+
+[[durable_objects.bindings]]
+name = "HOST_STATE"
+class_name = "HostState"
+
+[[migrations]]
+tag = "host-management-v1"
+new_sqlite_classes = ["HostState"]
