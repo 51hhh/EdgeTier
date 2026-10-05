@@ -43,4 +43,4 @@ The product retains one administrator, official-Web UID 2, up to 16 configured h
 
 ## Git publication
 
-The release source is ready for an intentional-files-only commit, followed by non-force publication to codex/onecloud-ddns-easytier and master and an annotated v0.2.1 tag. Remote publication and release links will be recorded after Git confirms them.
+The intentional release source was committed as b08367a04f4b234d74e23b8a665daa307a5cebf5 and pushed without force to codex/onecloud-ddns-easytier and master. Both remote branch heads were verified against the full commit ID. The remote annotated v0.2.1 tag peels to the same commit. GitHub Release: https://github.com/51hhh/EdgeTier/releases/tag/v0.2.1. The following documentation-only wrap-up does not change the deployed bundle.

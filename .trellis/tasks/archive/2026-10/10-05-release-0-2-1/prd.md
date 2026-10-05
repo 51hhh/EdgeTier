@@ -16,11 +16,11 @@ The user explicitly requested pushing the new version to Git and cloud and testi
 - Test real TCP/UDP joins and overlay/LAN HTTP, browser room/config/service flows, DDNS command acknowledgement, and bounded local multi-room/reconnect/queue regressions. Fix concrete additional failures.
 
 ## Acceptance
-- [ ] Merged local tests/typecheck/proto/build and deployment assembly checks pass.
-- [ ] Cloud0.2.1 runs repaired RelayRoom and preserves official bridge/host data/config.
-- [ ] Actual live mesh and DDNS acceptance succeeds after release.
-- [ ] Intentional source committed and pushed; remote branch/tag verified.
-- [ ] Remaining capability limits and test bounds documented.
+- [x] Merged local tests/typecheck/proto/build and deployment assembly checks pass.
+- [x] Cloud0.2.1 runs repaired RelayRoom and preserves official bridge/host data/config.
+- [x] Actual live mesh and DDNS acceptance succeeds after release.
+- [x] Intentional source committed and pushed; remote branch/tag verified.
+- [x] Remaining capability limits and test bounds documented.
 
 ## Evidence
 Previous review:.trellis/tasks/10-05-full-function-review. Current active Worker10fe67c5-c35b-433c-aee1-be32051fe160. Root legacy source:/var/backups/edgetier-rollout/20261005T111251Z/modules/index.js. Current19bindings and host-management-v1 migration. Nine legacy methods matched previous local source;emitFrame differed. Current171 TS and30 Python tests pass. EdgeTier single-admin and fixed official-Web UID2 remain declared product limits.

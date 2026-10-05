@@ -3,7 +3,7 @@
   "name": "release-0-2-1",
   "title": "Release EdgeTier 0.2.1 to Git and Cloudflare with live acceptance",
   "description": "",
-  "status": "in_progress",
+  "status": "completed",
   "dev_type": null,
   "scope": null,
   "package": null,
@@ -11,16 +11,20 @@
   "creator": "zwx19990307",
   "assignee": "zwx19990307",
   "createdAt": "2026-10-05",
-  "completedAt": null,
-  "branch": null,
+  "completedAt": "2026-10-05",
+  "branch": "codex/onecloud-ddns-easytier",
   "base_branch": "codex/onecloud-ddns-easytier",
   "worktree_path": null,
-  "commit": null,
+  "commit": "b08367a04f4b234d74e23b8a665daa307a5cebf5",
   "pr_url": null,
   "subtasks": [],
   "children": [],
   "parent": null,
   "relatedFiles": [],
   "notes": "",
-  "meta": {}
+  "meta": {
+    "release": "0.2.1",
+    "release_url": "https://github.com/51hhh/EdgeTier/releases/tag/v0.2.1",
+    "cloudflare_version": "b627f4e1-f07d-40bf-9d05-dd6e9feb7dd0"
+  }
 }
