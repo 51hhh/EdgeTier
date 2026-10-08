@@ -4,6 +4,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import fcntl
+import hashlib
 import ipaddress
 import json
 import os
@@ -28,7 +29,7 @@ def timestamp():
 def persist_status(observation):
     """Persist only the credential-free fields consumed by EdgeTier."""
     allowed = {'name', 'status', 'ipv6', 'ttl', 'proxied', 'lastAttemptAt',
-               'lastSuccessAt', 'errorCode'}
+               'lastSuccessAt', 'errorCode', 'recordIdentity'}
     clean = {key: value for key, value in observation.items() if key in allowed}
     STATUS.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     temporary = STATUS.with_suffix('.tmp')
@@ -40,9 +41,19 @@ def persist_status(observation):
     os.replace(temporary, STATUS)
 
 
-def previous_status():
+def record_identity(config):
+    # A non-secret fingerprint binds the cache to the provider record as well as
+    # its name. Never transfer a confirmation across a record/account change.
+    identity = [config['zone_id'], config['record_id'], config['name'].lower()]
+    return hashlib.sha256(json.dumps(identity, separators=(',', ':')).encode()).hexdigest()
+
+
+def previous_status(config=None):
     try:
         previous = json.loads(STATUS.read_text())
+        if config is not None and (previous.get('name', '').lower() != config['name'].lower()
+                                   or previous.get('recordIdentity') != record_identity(config)):
+            return {}
         return {key: previous[key] for key in ['name', 'ipv6', 'ttl', 'proxied', 'lastSuccessAt']
                 if key in previous}
     except (OSError, ValueError, TypeError):
@@ -155,18 +166,27 @@ def matches(record, desired):
         return False
 
 
-def update(config, address):
-    query = urllib.parse.urlencode({'name': config['name'], 'per_page': 100})
-    listing = api(config, '/dns_records?' + query)
-    records = listing['result']
-    info = listing.get('result_info', {})
-    if len(records) != 1 or info.get('total_pages', 1) > 1:
-        raise RuntimeError('ambiguous_dns_records')
-    record = records[0]
+def target_record(config):
+    record = api(config, '/dns_records/' + config['record_id'])['result']
     if record.get('id') != config['record_id'] or record.get('name') != config['name']:
         raise RuntimeError('dns_record_identity_mismatch')
     if record.get('type') not in ('A', 'AAAA'):
         raise RuntimeError('unexpected_dns_record_type')
+    return record
+
+
+def update(config, address):
+    record = target_record(config)
+    # An independent A record is valid dual stack. Other AAAA records could
+    # keep publishing stale addresses, so retain the ambiguity guard for AAAA.
+    query = urllib.parse.urlencode({'name': config['name'], 'type': 'AAAA', 'per_page': 100})
+    listing = api(config, '/dns_records?' + query)
+    records = listing['result']
+    info = listing.get('result_info', {})
+    if len(records) > 1 or info.get('total_pages', 1) > 1 or any(entry.get('id') != config['record_id'] for entry in records):
+        raise RuntimeError('ambiguous_dns_records')
+    if record.get('type') == 'AAAA' and not records:
+        raise RuntimeError('dns_record_list_mismatch')
     desired = {'type': 'AAAA', 'name': config['name'], 'content': address,
                'ttl': config['ttl'], 'proxied': False}
     changed = not matches(record, desired)
@@ -177,7 +197,7 @@ def update(config, address):
         saved = api(config, '/dns_records/' + config['record_id'], 'PUT', desired)['result']
         if not matches(saved, desired):
             raise RuntimeError('dns_update_confirmation_mismatch')
-    confirmed = api(config, '/dns_records/' + config['record_id'])['result']
+    confirmed = target_record(config)
     if not matches(confirmed, desired):
         raise RuntimeError('dns_readback_mismatch')
     return changed
@@ -206,7 +226,7 @@ def main():
             routes = run_json(['ip', '-j', '-6', 'route', 'get', '2606:4700:4700::1111'])
             address = select_verified(addresses, verified, routes, interface)
             if args.check:
-                record = api(config, '/dns_records/' + config['record_id'])['result']
+                record = target_record(config)
                 desired = {'name': config['name'], 'content': address, 'ttl': config['ttl']}
                 if not matches(record, desired):
                     raise RuntimeError('dns_check_mismatch')
@@ -215,11 +235,11 @@ def main():
                 status = 'updated' if update(config, address) else 'unchanged'
             observation = {'status': status, 'name': config['name'], 'ipv6': address,
                            'ttl': config['ttl'], 'proxied': False, 'lastAttemptAt': attempt,
-                           'lastSuccessAt': timestamp()}
+                           'lastSuccessAt': timestamp(), 'recordIdentity': record_identity(config)}
             persist_status(observation)
             print(json.dumps(observation))
         except Exception as error:
-            persist_status({**previous_status(), 'name': config['name'], 'status': 'error',
+            persist_status({**previous_status(config), 'name': config['name'], 'recordIdentity': record_identity(config), 'status': 'error',
                             'lastAttemptAt': attempt, 'errorCode': safe_error(error)})
             raise
 

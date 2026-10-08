@@ -4,7 +4,7 @@ import { createEasyTierFrame, parseEasyTierHeader } from '../easytier/packet';
 import { buildHandshakeRequest, encodeHandshake } from '../easytier/handshake';
 import { buildRpcRequestPayloads, decodeEasyTierRpcPacket, decodeRpcPacket, encodeSyncRouteInfoRequest, RpcPacketMerger, type PeerCenterGlobalMap, type RoutePeerInfo, type RpcPacket, type SyncRouteInfoRequest } from '../easytier/rpc';
 import { AEAD_TAIL_SIZE, decryptAesGcm, deriveKeys, type DerivedKeys } from '../easytier/crypto';
-import type { PeerSnapshot, TopologyEdge, TrafficSnapshot } from '../observer/types';
+import type { PeerSnapshot, RelayEvent, RoomSnapshot, TopologyEdge, TrafficSnapshot } from '../observer/types';
 import type { Env } from '../worker/env';
 import { applyOspfRouteSessionResponse, MAX_PENDING_ROUTE_SYNCS, RELAY_QUEUE_LIMITS, RelayRoom, ROUTE_SYNC_TIMEOUT_MS, type OspfRouteSessionState } from './relay-room';
 
@@ -20,6 +20,7 @@ type FixtureSession = PeerSnapshot & {
 
 // The harness exposes private methods only to run lifecycle regressions with actual class behavior.
 interface RoomHarness {
+  events: RelayEvent[];
   sessions: Map<string, FixtureSession>; peers: Map<number, string>;
   peerCenter: Map<number, { directPeers: Map<number, { latencyMs: number }>; lastSeen: string }>;
   rawRoutePeerInfos: Map<number, RoutePeerInfo>; connBitmapEdges: TopologyEdge[];
@@ -46,6 +47,55 @@ interface RoomHarness {
   runHeartbeatMaintenance: (now?: number) => void;
   mergeRpcPacket: (session: FixtureSession, header: NonNullable<ReturnType<typeof parseEasyTierHeader>>, packet: RpcPacket) => RpcPacket | undefined;
 }
+
+describe('isolated test previews', () => {
+  it('rejects malformed previews before changing existing preview state', async () => {
+    const { room } = await fixture({ name: 'alpha' });
+    const seed = (body: unknown) => room.fetch(new Request('https://room/test-seed?room=alpha', { method: 'POST', body: JSON.stringify(body) }));
+    await seed({ count: 2 });
+    for (const body of [null, [], { count: '3' }, { count: 2.5 }, { count: 17 }, { clear: 'yes' }]) {
+      expect((await seed(body)).status).toBe(400);
+      const snapshot = await (await room.fetch(new Request('https://room/?room=alpha'))).json() as RoomSnapshot;
+      expect(snapshot.testData?.peers).toHaveLength(2);
+    }
+  });
+  it.each([false, true])('clears only preview state with synthetic data present: %s', async (seedFirst) => {
+    const { room, relay, saved } = await fixture({ name: 'alpha' });
+    const live = session(relay, 'real', 11);
+    relay.events.push({ id: 'real-event', roomId: 'alpha', timestamp: new Date().toISOString(), type: 'connected', message: 'real connection' });
+    relay.traffic.rxBytes = 4096;
+    relay.traffic.txBytes = 2048;
+    relay.peerCenter.set(11, { directPeers: new Map([[22, { latencyMs: 1 }]]), lastSeen: new Date().toISOString() });
+    await relay.persistControlState();
+    const persisted = structuredClone(saved.get('control-state:v1'));
+    const read = async () => await (await room.fetch(new Request('https://room/?room=alpha'))).json() as RoomSnapshot;
+    const before = await read();
+    const seed = (body: unknown) => room.fetch(new Request('https://room/test-seed?room=alpha', { method: 'POST', body: JSON.stringify(body) }));
+    if (seedFirst) {
+      expect((await seed({ count: 3 })).status).toBe(200);
+      const preview = await read();
+      expect(preview.testData?.peers).toHaveLength(3);
+      expect(preview.testData?.traffic.rxBytes).toBeGreaterThan(0);
+      expect(preview.testData?.events.every((event) => event.message.startsWith('[synthetic]'))).toBe(true);
+      expect(preview.peerCount).toBe(before.peerCount);
+      expect(preview.websocketCount).toBe(before.websocketCount);
+      expect(preview.bytes).toBe(before.bytes);
+      await seed({ count: 2 });
+      expect((await read()).testData?.peers).toHaveLength(2);
+    }
+    await seed({ clear: true });
+    const after = await read();
+    expect(after.testData).toBeUndefined();
+    expect(after.peers).toEqual(before.peers);
+    expect(after.recentEvents).toEqual(before.recentEvents);
+    expect(after.traffic).toEqual(before.traffic);
+    expect(after.topology).toEqual(before.topology);
+    expect(relay.peerCenter.has(11)).toBe(true);
+    expect(relay.sessions.get('real')).toBe(live.value);
+    expect(saved.get('control-state:v1')).toEqual(persisted);
+    expect(relay.queueControlStatePersist).not.toHaveBeenCalled();
+  });
+});
 
 async function fixture(options: { env?: Partial<Env>; name?: string; stored?: unknown; put?: (key: string, value: unknown) => Promise<void> } = {}) {
   const saved = new Map<string, unknown>();

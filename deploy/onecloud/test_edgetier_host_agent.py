@@ -161,6 +161,20 @@ class HostSafety(unittest.TestCase):
 
 
 class HostRegressions(unittest.TestCase):
+    def test_multiple_ipv6_addresses_use_the_writer_source_only_when_still_eligible(self):
+        addresses = [{'ifname': 'eth0', 'flags': ['UP'], 'addr_info': [
+            {'family': 'inet6', 'scope': 'global', 'local': '2409::1'},
+            {'family': 'inet6', 'scope': 'global', 'local': '2409::2'},
+            {'family': 'inet6', 'scope': 'global', 'local': '2409::3', 'temporary': True}]}]
+        with patch.object(agent, 'run', return_value=json.dumps(addresses)):
+            self.assertEqual(agent.current_ipv6('2409:0:0:0:0:0:0:2'), '2409::2')
+            self.assertIsNone(agent.current_ipv6())
+            self.assertIsNone(agent.current_ipv6('2409::3'))
+            self.assertIsNone(agent.current_ipv6('2409::4'))
+        with patch.object(agent, 'load_json', return_value={'name': 'ip.example.org', 'status': 'unchanged', 'ipv6': '2409::2'}), patch.object(agent, 'current_ipv6', return_value='2409::2') as current:
+            self.assertEqual(agent.ddns({'directHostname': 'ip.example.org'})['currentIpv6'], '2409::2')
+            current.assert_called_once_with('2409::2')
+
     def test_del_peer_names_do_not_poison_other_observations(self):
         peers = agent.sanitize_peers([{'route': {'peer_id': 1, 'hostname': 'peer\u007f', 'version': '2.6.4'}, 'peer': {'conns': []}}])
         self.assertNotIn('hostname', peers[0])

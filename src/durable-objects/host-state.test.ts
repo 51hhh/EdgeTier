@@ -111,4 +111,28 @@ describe('fixed DDNS request and acknowledgements', () => {
     expect(await (await host.fetch(request('/report', report(2)))).json()).toEqual({ accepted: true });
     expect(await (await host.fetch(request())).json()).toMatchObject({ command: { status: 'failed', errorCode: 'command_expired' } });
   });
+  it.each([false, true])('reconciles an on-time completion delivered after expiry (prior expiry read: %s)', async (readFirst) => {
+    const { state } = hostStore();
+    const host = new HostState(state, env);
+    const pending = await command(host);
+    const ack = { id: pending.id, status: 'completed' as const, completedAt: new Date(now + 60_000).toISOString() };
+    vi.setSystemTime(now + HOST_COMMAND_TTL_MS + 30_000);
+    if (readFirst) expect(await (await host.fetch(request())).json()).toMatchObject({ command: { errorCode: 'command_expired' } });
+    const restarted = new HostState(state, env);
+    expect(await (await restarted.fetch(request('/report', report(1, { commandAck: ack })))).json()).toEqual({ accepted: true });
+    const snapshot = await (await restarted.fetch(request())).json() as HostSnapshot;
+    expect(snapshot.command).toMatchObject({ id: pending.id, status: 'completed', completedAt: ack.completedAt });
+    expect(snapshot.command?.errorCode).toBeUndefined();
+  });
+  it('does not reconcile a completion after the execution deadline or replace a newer command', async () => {
+    const host = new HostState(hostStore().state, env);
+    const prior = await command(host);
+    vi.setSystemTime(now + HOST_COMMAND_TTL_MS + 30_000);
+    const lateAck = { id: prior.id, status: 'completed' as const, completedAt: new Date(now + HOST_COMMAND_TTL_MS + 1).toISOString() };
+    expect((await host.fetch(request('/report', report(1, { commandAck: lateAck })))).status).toBe(200);
+    expect(await (await host.fetch(request())).json()).toMatchObject({ report: { sequence: 1 }, command: { errorCode: 'command_expired' } });
+    const next = await command(host);
+    expect(await (await host.fetch(request('/report', report(2, { commandAck: { id: prior.id, status: 'completed', completedAt: new Date(now + 60_000).toISOString() } })))).json()).toMatchObject({ command: { id: next.id } });
+    expect(await (await host.fetch(request())).json()).toMatchObject({ command: { id: next.id, status: 'pending' } });
+  });
 });

@@ -222,7 +222,7 @@ export function App() {
   const defaultRoomId = defaultRoom?.roomId ?? 'default';
   const defaultNetworkName = defaultRoom?.networkName ?? defaultRoomId;
   const selectedPeer = useMemo(
-    () => (room && selectedSession ? room.peers.find((peer) => peer.sessionId === selectedSession) : undefined),
+    () => (room && selectedSession ? [...room.peers, ...(room.testData?.peers ?? [])].find((peer) => peer.sessionId === selectedSession) : undefined),
     [room, selectedSession],
   );
 
@@ -278,6 +278,16 @@ export function App() {
       </LayerCard>
 
       {selected && !selectedListedRoom && <section className="notice text-kumo-subtle">{t('devices.manualRoom', { room: selected })}</section>}
+
+      {room?.testData && <LayerCard>
+        <LayerCard.Secondary>{t('devices.testPreview')} <Badge variant="outline">{t('devices.synthetic')}</Badge></LayerCard.Secondary>
+        <LayerCard.Primary><div className="stack">
+          <Text as="p" variant="secondary">{t('devices.previewHelp')}</Text>
+          <PeerTable peers={room.testData.peers} selectedSession={selectedSession} onSelect={setSelectedSession} t={t} />
+          <Text as="p" variant="secondary">{t('common.rx')}: {room.testData.traffic.rxBytes} B · {t('common.tx')}: {room.testData.traffic.txBytes} B</Text>
+          <Logs events={room.testData.events} t={t} />
+        </div></LayerCard.Primary>
+      </LayerCard>}
 
       <LayerCard>
         <LayerCard.Secondary>{t('devices.title')} {room ? <Badge variant="outline">{room.websocketCount} {t('common.websockets')}</Badge> : null}</LayerCard.Secondary>

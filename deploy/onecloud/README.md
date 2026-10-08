@@ -43,7 +43,7 @@ The agent persists execution intent before dispatch and completion before acknow
 
 ## Production source and adapter ownership
 
-The GitHub baseline predates the deployed v2 official EasyTier Web/VPC bridge and ConfigServerProbe. The root-private legacy module remains necessary; never copy it or resident credentials into Git. Release 0.2.2 exports the repaired modern RelayRoom under the same existing class/binding name, plus modern HostState. Directory and ConfigServerProbe remain legacy exports. There is no namespace replacement or migration in this code-only release.
+The GitHub baseline predates the deployed v2 official EasyTier Web/VPC bridge and ConfigServerProbe. The root-private legacy module remains necessary; never copy it or resident credentials into Git. Release 0.2.3 exports the repaired modern RelayRoom under the same existing class/binding name, plus modern HostState. Directory and ConfigServerProbe remain legacy exports. There is no namespace replacement or migration in this code-only release.
 
 Legacy retains public /ws and /config-server/ws admission, management hostname and Cloudflare Access validation, login/logout/cookies, room/default-room handlers, dashboard assets, official Web bridge and unknown/extended routes. Its room/WS handlers reach the repaired class through the unchanged RELAY_ROOM binding. The adapter turns only URIError on legacy room paths into a controlled 400. Protected modern host/profile handlers first call authoritative legacy /api/auth/me with the same origin and headers, then apply their existing cookie validation. Only the fixed, host-scoped bearer report route is exempt. Do not replace the legacy management gate with a cookie-only handler or guess its Access internals.
 
@@ -58,14 +58,14 @@ rollout-edgetier.py is a OneCloud-local adapter for this deployment. The initial
 ### 2. Signatures
 
 ```text
-python3 rollout-edgetier.py --backup <root-private-baseline> --bundle <release-bundle> --release-version 0.2.2 --code-only
-python3 rollout-edgetier.py --backup <root-private-baseline> --bundle <recovery-bundle> --release-version 0.2.2 --code-only --forward-recovery
+python3 rollout-edgetier.py --backup <root-private-baseline> --bundle <release-bundle> --release-version 0.2.3 --code-only
+python3 rollout-edgetier.py --backup <root-private-baseline> --bundle <recovery-bundle> --release-version 0.2.3 --code-only --forward-recovery
 ```
 
 A normal bundle contains client/, modern.js, edge-extension.js and release.json:
 
 ```json
-{"version":"0.2.2","target":"edgetier","relayImplementation":"modern"}
+{"version":"0.2.3","target":"edgetier","relayImplementation":"modern"}
 ```
 
 ### 3. Contracts

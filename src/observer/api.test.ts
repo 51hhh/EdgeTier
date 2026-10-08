@@ -25,7 +25,7 @@ describe('release health', () => {
       { username: 'fixture-admin', expiresAt: new Date(Date.now() + 60_000).toISOString() });
     expect(response?.status).toBe(200);
     await expect(response?.json()).resolves.toMatchObject({
-      ok: true, service: 'edgetier', version: '0.2.2',
+      ok: true, service: 'edgetier', version: '0.2.3',
       capabilities: expect.arrayContaining(['wss-relay', 'easytier-outbound-tcp', 'host-status', 'ddns-management', 'config-profiles']),
     });
   });

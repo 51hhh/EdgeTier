@@ -4,6 +4,7 @@ import unittest
 import json
 import tempfile
 import subprocess
+import builtins
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -93,6 +94,80 @@ class AddressSafety(unittest.TestCase):
             self.assertEqual(saved['status'],'error')
             self.assertEqual(saved['lastSuccessAt'],'2026-10-05T12:00:00Z')
             self.assertEqual(ddns.safe_error(RuntimeError('Authorization: secret-token')), 'ddns_operation_failed')
+
+    def test_success_cache_is_scoped_to_name_zone_and_record(self):
+        config = {'name': 'ip.example.org', 'zone_id': 'zone-1', 'record_id': 'record-1'}
+        with tempfile.TemporaryDirectory() as directory, patch.object(ddns, 'STATUS', Path(directory)/'status.json'):
+            ddns.persist_status({'name': config['name'], 'ipv6': '2409::1', 'proxied': False,
+                'lastSuccessAt': '2026-10-05T12:00:00Z', 'recordIdentity': ddns.record_identity(config)})
+            self.assertEqual(ddns.previous_status(config)['ipv6'], '2409::1')
+            for change in [{'name': 'new.example.org'}, {'zone_id': 'zone-2'}, {'record_id': 'record-2'}]:
+                self.assertEqual(ddns.previous_status({**config, **change}), {})
+            # Old observations have no provider identity and cannot prove ownership.
+            ddns.persist_status({'name': config['name'], 'ipv6': '2409::1', 'lastSuccessAt': '2026-10-05T12:00:00Z'})
+            self.assertEqual(ddns.previous_status(config), {})
+
+    def test_main_failure_never_relabels_previous_record_success(self):
+        old = {'name': 'old.example.org', 'zone_id': 'zone-1', 'record_id': 'record-1'}
+        new = {**old, 'name': 'new.example.org', 'interface': 'eth0'}
+        original_open = builtins.open
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            config = folder/'config.json'
+            config.write_text(json.dumps(new)); config.chmod(0o600)
+            def opened(path, *args, **kwargs):
+                return original_open(folder/'lock' if str(path) == '/run/onecloud-ddns.lock' else path, *args, **kwargs)
+            with patch.object(ddns, 'CONFIG', config), patch.object(ddns, 'STATUS', folder/'status.json'), patch.object(ddns, 'run_json', return_value=[]), patch('builtins.open', side_effect=opened), patch.object(ddns.sys, 'argv', ['writer']):
+                ddns.persist_status({'name': old['name'], 'ipv6': '2409::1', 'proxied': False,
+                    'lastSuccessAt': '2026-10-05T12:00:00Z', 'recordIdentity': ddns.record_identity(old)})
+                with self.assertRaisesRegex(RuntimeError, 'invalid_ipv6_candidate_count'):
+                    ddns.main()
+                saved = json.loads(ddns.STATUS.read_text())
+                self.assertEqual(saved['name'], new['name'])
+                self.assertEqual(saved['status'], 'error')
+                self.assertNotIn('lastSuccessAt', saved)
+                self.assertNotIn('ipv6', saved)
+                self.assertEqual(saved['recordIdentity'], ddns.record_identity(new))
+
+    def test_updates_only_configured_aaaa_and_preserves_coexisting_a(self):
+        config = {'name': 'ip.example.org', 'record_id': 'aaaa', 'ttl': 120}
+        records = {'a': {'id': 'a', 'name': config['name'], 'type': 'A', 'content': '198.51.100.1', 'ttl': 120, 'proxied': False},
+                   'aaaa': {'id': 'aaaa', 'name': config['name'], 'type': 'AAAA', 'content': '2409::1', 'ttl': 120, 'proxied': False}}
+        original_a = dict(records['a'])
+        writes = []
+        def api(_config, path, method='GET', payload=None):
+            if '?' in path:
+                self.assertEqual(ddns.urllib.parse.parse_qs(path.split('?', 1)[1])['type'], ['AAAA'])
+                return {'result': [dict(record) for record in records.values() if record['type'] == 'AAAA']}
+            identifier = path.rsplit('/', 1)[1]
+            if method == 'PUT':
+                writes.append(identifier)
+                records[identifier] = {'id': identifier, **payload}
+            return {'result': dict(records[identifier])}
+        with patch.object(ddns, 'api', side_effect=api):
+            self.assertTrue(ddns.update(config, '2409::2'))
+            self.assertFalse(ddns.update(config, '2409::2'))
+        self.assertEqual(records['a'], original_a)
+        self.assertEqual(writes, ['aaaa'])
+
+    def test_rejects_other_aaaa_records_and_wrong_target_identity(self):
+        config = {'name': 'ip.example.org', 'record_id': 'target', 'ttl': 120}
+        record = {'id': 'target', 'name': config['name'], 'type': 'AAAA'}
+        with patch.object(ddns, 'api', side_effect=[{'result': record}, {'result': [record, {**record, 'id': 'other'}]}]) as api:
+            with self.assertRaisesRegex(RuntimeError, 'ambiguous_dns_records'):
+                ddns.update(config, '2409::1')
+            self.assertTrue(all(len(call.args) < 3 or call.args[2] != 'PUT' for call in api.call_args_list))
+        with patch.object(ddns, 'api', return_value={'result': {**record, 'id': 'wrong'}}):
+            with self.assertRaisesRegex(RuntimeError, 'dns_record_identity_mismatch'):
+                ddns.update(config, '2409::1')
+
+    def test_converts_the_configured_a_when_no_aaaa_exists(self):
+        config = {'name': 'ip.example.org', 'record_id': 'target', 'ttl': 120}
+        old = {'id': 'target', 'name': config['name'], 'type': 'A'}
+        new = {'id': 'target', 'name': config['name'], 'type': 'AAAA', 'content': '2409::1', 'ttl': 120, 'proxied': False}
+        with patch.object(ddns, 'api', side_effect=[{'result': old}, {'result': []}, {'result': new}, {'result': new}]) as api:
+            self.assertTrue(ddns.update(config, '2409::1'))
+            self.assertEqual(api.call_args_list[2].args[2], 'PUT')
 
 if __name__ == '__main__':
     unittest.main()

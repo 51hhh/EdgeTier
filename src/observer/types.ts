@@ -91,6 +91,8 @@ export interface RoomSnapshot {
   peers: PeerSnapshot[];
   recentEvents: RelayEvent[];
   topology?: TopologySnapshot;
+  /** In-memory preview only; never included in live counts or persisted routes. */
+  testData?: { peers: PeerSnapshot[]; events: RelayEvent[]; traffic: TrafficSnapshot };
 }
 
 export interface DirectoryRoomSummary {

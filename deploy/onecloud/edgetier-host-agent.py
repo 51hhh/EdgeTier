@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-VERSION = '1.0.2'
+VERSION = '1.0.3'
 MAX_REPORT_BYTES = 64 * 1024
 UNITS = ('easytier-core-home.service', 'easytier-web.service',
          'edgetier-home-cloudflared.service', 'onecloud-ddns.timer',
@@ -236,7 +236,7 @@ def services():
     return result
 
 
-def current_ipv6():
+def current_ipv6(preferred=None):
     try:
         interfaces = json.loads(run(['ip', '-j', '-6', 'addr', 'show', 'dev', 'eth0']))
         addresses = set()
@@ -254,6 +254,16 @@ def current_ipv6():
                 addr = ipaddress.ip_address(entry['local'])
                 if addr in ipaddress.ip_network('2000::/3'):
                     addresses.add(str(addr))
+        # The writer has already selected/probed its source. Check that exact
+        # address is still eligible instead of declaring every multi-address
+        # interface ambiguous. Cached DNS success alone does not verify routing.
+        if preferred:
+            try:
+                selected = str(ipaddress.IPv6Address(preferred))
+                if selected in addresses:
+                    return selected
+            except ValueError:
+                pass
         return addresses.pop() if len(addresses) == 1 else None
     except Exception:
         return None
@@ -266,7 +276,7 @@ def ddns(config):
     observation = {key: raw[key] for key in allowed if key in raw}
     if raw.get('name') != config['directHostname']:
         observation = {'name': config['directHostname'], 'status': 'unknown'}
-    if current := current_ipv6():
+    if current := current_ipv6(observation.get('ipv6')):
         observation['currentIpv6'] = current
     return observation
 

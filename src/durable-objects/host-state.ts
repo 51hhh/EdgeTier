@@ -88,12 +88,21 @@ export class HostState implements DurableObject {
 
     const ack = report.commandAck;
     const command = this.data.command;
-    if (ack && command && ack.id === command.id && command.status === 'pending') {
+    // Delivery may fail after local execution. Reconcile the same expired request
+    // from its completion time; an acknowledgement never replaces a newer ID.
+    if (ack && command && ack.id === command.id && (command.status === 'pending'
+      || command.status === 'failed' && command.errorCode === 'command_expired')) {
       const completed = Date.parse(ack.completedAt);
       // Host timestamps may have whole-second precision. Permit only a small clock skew.
-      if (completed < Date.parse(command.requestedAt) - 5000 || completed > Date.parse(command.expiresAt)
-        || completed > now + 5000 || completed > Date.parse(report.capturedAt) + 5000) return error('invalid command acknowledgement time', 400);
-      this.data.command = { ...command, status: ack.status, completedAt: ack.completedAt, ...(ack.errorCode ? { errorCode: ack.errorCode } : {}) };
+      const timely = completed >= Date.parse(command.requestedAt) - 5000 && completed <= Date.parse(command.expiresAt)
+        && completed <= now + 5000 && completed <= Date.parse(report.capturedAt) + 5000;
+      if (!timely && command.status === 'pending') return error('invalid command acknowledgement time', 400);
+      if (timely) {
+        const { errorCode: _expiredError, completedAt: _expiredAt, ...identity } = command;
+        this.data.command = { ...identity, status: ack.status, completedAt: ack.completedAt, ...(ack.errorCode ? { errorCode: ack.errorCode } : {}) };
+      }
+      // A retained acknowledgement for an expired, overlong execution must not
+      // poison all subsequent telemetry uploads from the collector's journal.
     }
     // A previously acknowledged command may remain in the collector's retry journal.
     // It never overwrites a newer command, and does not block delivery of that command.

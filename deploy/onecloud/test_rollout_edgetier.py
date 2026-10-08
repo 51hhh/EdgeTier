@@ -103,14 +103,14 @@ class CodeOnlyRollout(unittest.TestCase):
         (self.backup / 'modules/index.js').write_text('export class RelayRoom {}\nexport class Directory {}\nexport class ConfigServerProbe {}\n')
         (self.bundle / 'modern.js').write_text('export class HostState {}\nexport class RelayRoom {}\n')
         (self.bundle / 'edge-extension.js').write_text(Path(__file__).with_name('edge-extension.js').read_text())
-        self.write_json(self.bundle / 'release.json', {'version': '0.2.2', 'target': 'edgetier', 'relayImplementation': 'modern'})
+        self.write_json(self.bundle / 'release.json', {'version': '0.2.3', 'target': 'edgetier', 'relayImplementation': 'modern'})
         (self.bundle / 'client/index.html').write_text('<!doctype html><title>Fixture</title>')
 
     @staticmethod
     def write_json(path, value):
         path.write_text(json.dumps(value))
 
-    def run_code_only(self, release_version='0.2.2', forward_recovery=False, code_only=True):
+    def run_code_only(self, release_version='0.2.3', forward_recovery=False, code_only=True):
         cloud = FakeCloudflare(self.settings)
         self.last_cloud = cloud
         self.root_path_calls = []
@@ -166,7 +166,7 @@ class CodeOnlyRollout(unittest.TestCase):
         self.assertFalse((self.backup / 'host-config-before.json').exists())
         return cloud
 
-    def assert_rejected_before_privileged_io(self, code, version='0.2.2', **options):
+    def assert_rejected_before_privileged_io(self, code, version='0.2.3', **options):
         with self.assertRaisesRegex(RuntimeError, '^' + code + '$'):
             self.run_code_only(version, **options)
         self.assertEqual(self.last_cloud.requests, [])
@@ -190,7 +190,7 @@ class CodeOnlyRollout(unittest.TestCase):
     def use_recovery_bundle(self):
         entry = Path(__file__).with_name('edge-extension.js').read_text()
         (self.bundle / 'edge-extension.js').write_text(rollout.recovery_entry(entry))
-        self.write_json(self.bundle / 'release.json', {'version': '0.2.2', 'target': 'edgetier', 'relayImplementation': 'legacy-recovery'})
+        self.write_json(self.bundle / 'release.json', {'version': '0.2.3', 'target': 'edgetier', 'relayImplementation': 'legacy-recovery'})
 
     def test_forward_recovery_preserves_bindings_without_migrations_or_config_bootstrap(self):
         self.use_recovery_bundle()

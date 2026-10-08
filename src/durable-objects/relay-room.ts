@@ -174,6 +174,8 @@ export class RelayRoom implements DurableObject {
   private peers = new Map<number, string>();
   private events: RelayEvent[] = [];
   private seededPeers: PeerSnapshot[] = [];
+  private seededEvents: RelayEvent[] = [];
+  private seededTraffic: TrafficCounters = emptyTrafficCounters();
   private routePeers = new Map<number, RoutePeerSnapshot>();
   private rawRoutePeerInfos = new Map<number, RoutePeerInfo>();
   private connBitmapEdges: TopologyEdge[] = [];
@@ -1194,31 +1196,25 @@ export class RelayRoom implements DurableObject {
   }
 
   private async seed(request: Request, roomId: string): Promise<Response> {
-    const body = await request.json().catch(() => ({})) as { count?: number; clear?: boolean };
+    const body = await request.json().catch(() => null) as { count?: number; clear?: boolean } | null;
+    if (!body || typeof body !== 'object' || Array.isArray(body)
+      || Object.keys(body).some((key) => !['count', 'clear'].includes(key))
+      || body.clear !== undefined && typeof body.clear !== 'boolean'
+      || body.count !== undefined && (!Number.isInteger(body.count) || body.count < 1 || body.count > 16)) {
+      return Response.json({ error: 'invalid test preview request' }, { status: 400 });
+    }
+    // Preview state is independent of real routes, sessions, history and rates.
+    this.seededPeers = [];
+    this.seededEvents = [];
+    this.seededTraffic = emptyTrafficCounters();
     if (body.clear) {
-      this.seededPeers = [];
-      this.routePeers = new Map();
-      this.rawRoutePeerInfos = new Map();
-      this.connBitmapPeerIds = [];
-      this.connBitmapEdges = [];
-      this.connRows.clear();
-      this.unconfirmedRoutePeerIds.clear();
-      this.unconfirmedConnPeerIds.clear();
-      this.unconfirmedPeerCenterIds.clear();
-      this.peerCenter = new Map();
-      this.peerCenterEdges = [];
-      this.topologyUpdatedAt = undefined;
-      this.events = [];
-      this.traffic = emptyTrafficCounters();
-      this.trafficSamples = [];
-      this.sessionRateBaselines = new Map();
-      this.queueControlStatePersist(true);
-      this.queueDirectorySync(roomId, true);
       return Response.json({ ok: true, cleared: true });
     }
-    const count = Math.min(Math.max(body.count ?? 3, 1), 16);
+    const count = body.count ?? 3;
     const now = Date.now();
-    this.seededPeers = [];
+    const addPreviewEvent = (type: RelayEvent['type'], message: string) => this.seededEvents.push({
+      id: crypto.randomUUID(), timestamp: new Date(now).toISOString(), roomId, type, message: `[synthetic] ${message}`,
+    });
     for (let index = 0; index < count; index += 1) {
       const peerId = 1000 + index;
       const connected = index % 4 !== 0;
@@ -1238,19 +1234,18 @@ export class RelayRoom implements DurableObject {
         rxPackets: index + 5,
         txPackets: index + 2,
       });
-      this.traffic.rxBytes += rxBytes;
-      this.traffic.txBytes += txBytes;
-      this.traffic.rxPackets += index + 5;
-      this.traffic.txPackets += index + 2;
-      this.traffic.forwardedPackets += index + 1;
-      if (index % 4 === 0) this.traffic.unroutablePackets += 1;
-      this.addEvent(roomId, 'connected', `seed peer ${peerId} connected`);
-      this.addEvent(roomId, 'handshake_seen', `seed peer ${peerId} handshake observed (synthetic)`);
-      if (index % 3 === 0) this.addEvent(roomId, 'packet_forwarded', `seed packet forwarded to peer ${peerId}`);
-      if (index % 4 === 0) this.addEvent(roomId, 'packet_unroutable', `seed packet to peer ${peerId} not routable`);
-      if (!connected) this.addEvent(roomId, 'disconnected', `seed peer ${peerId} disconnected`);
+      this.seededTraffic.rxBytes += rxBytes;
+      this.seededTraffic.txBytes += txBytes;
+      this.seededTraffic.rxPackets += index + 5;
+      this.seededTraffic.txPackets += index + 2;
+      this.seededTraffic.forwardedPackets += index + 1;
+      if (index % 4 === 0) this.seededTraffic.unroutablePackets += 1;
+      addPreviewEvent('connected', `seed peer ${peerId} connected`);
+      addPreviewEvent('handshake_seen', `seed peer ${peerId} handshake observed`);
+      if (index % 3 === 0) addPreviewEvent('packet_forwarded', `seed packet forwarded to peer ${peerId}`);
+      if (index % 4 === 0) addPreviewEvent('packet_unroutable', `seed packet to peer ${peerId} not routable`);
+      if (!connected) addPreviewEvent('disconnected', `seed peer ${peerId} disconnected`);
     }
-    this.queueDirectorySync(roomId, true);
     return Response.json({ ok: true, seeded: count });
   }
 
@@ -1354,15 +1349,18 @@ export class RelayRoom implements DurableObject {
       rxPackets: 0,
       txPackets: 0,
     }] : [];
-    const peers = [...edgePeer, ...livePeers, ...routeOnlyPeers, ...peerCenterOnlyPeers, ...this.seededPeers];
+    const peers = [...edgePeer, ...livePeers, ...routeOnlyPeers, ...peerCenterOnlyPeers];
     const peerIds = new Set<number>();
     if (includeEdgePeer) peerIds.add(EDGE_PEER_ID);
     for (const peerId of this.peers.keys()) peerIds.add(peerId);
     for (const peerId of this.routePeers.keys()) peerIds.add(peerId);
     for (const peerId of peerCenterLastSeen.keys()) peerIds.add(peerId);
-    const peerCount = peerIds.size + this.seededPeers.length;
-    const websocketCount = [...this.sessions.values()].filter((session) => session.transportKind === 'websocket').length + this.seededPeers.length;
-    return { roomId, peerCount, websocketCount, bytes: this.traffic.rxBytes + this.traffic.txBytes, lastActivity, traffic, peers, recentEvents: this.events.slice(-50), topology: this.snapshotTopology(roomId) };
+    const peerCount = peerIds.size;
+    const websocketCount = [...this.sessions.values()].filter((session) => session.transportKind === 'websocket').length;
+    return { roomId, peerCount, websocketCount, bytes: this.traffic.rxBytes + this.traffic.txBytes, lastActivity, traffic, peers, recentEvents: this.events.slice(-50), topology: this.snapshotTopology(roomId),
+      ...(this.seededPeers.length ? { testData: { peers: [...this.seededPeers], events: [...this.seededEvents],
+        traffic: { ...this.seededTraffic, samples: [], summary: buildTrafficSummary(this.seededTraffic, undefined) } } } : {}),
+    };
   }
 
   private snapshotTopology(roomId: string): TopologySnapshot {
