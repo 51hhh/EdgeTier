@@ -19,6 +19,19 @@ function host(id = 'onecloud'): HostSnapshot {
 function ddns(hosts: HostSnapshot[]) { return renderToStaticMarkup(<DdnsDashboard hosts={hosts} now={NOW} t={t} requesting={{}} refreshErrors={{}} onRefresh={() => {}} />); }
 
 describe('host availability and service display', () => {
+  it('shows grouped failures and a separate successful address ledger', () => {
+    const snapshot = host();
+    snapshot.report!.ddns.status = 'error';
+    snapshot.report!.ddns.errorCode = 'ipv6_probe_failed';
+    snapshot.ddnsHistory = [{ receivedAt: '2026-10-05T12:05:00Z', firstReceivedAt: '2026-10-05T12:01:00Z', count: 200,
+      observation: snapshot.report!.ddns }];
+    snapshot.ddnsAddressHistory = [{ ipv6: '2409::a', firstSuccessAt: '2026-10-04T12:00:00Z', lastSuccessAt: '2026-10-04T13:00:00Z', successCount: 3 }];
+    const html = ddns([snapshot]);
+    expect(html).toContain(t('ddns.addressHistory'));
+    expect(html).toContain('2409::a');
+    expect(html).toContain('200');
+    expect(html).toContain(t('ddns.probeFailed'));
+  });
   it('preserves failed host observations but disables its control while another host remains usable', () => {
     const first = host();
     const failed: HostSnapshot = { profile: first.profile, freshness: 'never', ddnsHistory: [], readErrorCode: 'host_state_unavailable' };

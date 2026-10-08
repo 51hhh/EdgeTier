@@ -27,6 +27,8 @@ export interface HostService {
   /** Persistently enabled in the unit file, not a guarantee of startup. */
   enabled: boolean;
   unitFileState?: string;
+  result?: string;
+  exitCode?: number;
 }
 
 export interface HostNode {
@@ -98,6 +100,16 @@ export interface HostCommand {
 export interface DdnsHistoryEntry {
   receivedAt: string;
   observation: DdnsObservation;
+  firstReceivedAt?: string;
+  count?: number;
+  recovered?: boolean;
+}
+
+export interface DdnsAddressHistoryEntry {
+  ipv6: string;
+  firstSuccessAt: string;
+  lastSuccessAt: string;
+  successCount: number;
 }
 
 export interface HostSnapshot {
@@ -106,6 +118,7 @@ export interface HostSnapshot {
   receivedAt?: string;
   freshness: 'fresh' | 'stale' | 'never';
   ddnsHistory: DdnsHistoryEntry[];
+  ddnsAddressHistory?: DdnsAddressHistoryEntry[];
   command?: HostCommand;
   readErrorCode?: 'host_state_unavailable';
 }
@@ -121,6 +134,7 @@ export interface ConfigProfile extends HostProfile {
   ddnsStatus: DdnsObservation['status'];
   confirmedIpv6?: string;
   verifiedAt?: string;
+  directVerification?: 'verified' | 'failed' | 'stale' | 'mismatch' | 'unknown';
   directPeers: string[];
   ipv6Only: true;
   readErrorCode?: HostSnapshot['readErrorCode'];

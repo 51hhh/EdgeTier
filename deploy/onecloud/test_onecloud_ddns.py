@@ -3,6 +3,8 @@ from pathlib import Path
 import unittest
 import json
 import tempfile
+import subprocess
+from types import SimpleNamespace
 from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('ddns', Path(__file__).with_name('onecloud-ddns.py'))
@@ -10,6 +12,30 @@ ddns = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ddns)
 
 class AddressSafety(unittest.TestCase):
+    def test_probe_falls_back_after_timeout_and_checks_exact_ipv6_source(self):
+        outcomes = [subprocess.TimeoutExpired('curl', 15), SimpleNamespace(returncode=0, stdout='ip=2409::1\n')]
+        with patch.object(ddns.subprocess, 'run', side_effect=outcomes) as run:
+            self.assertTrue(ddns.probe('2409::1'))
+            self.assertEqual(run.call_count, 2)
+            for call in run.call_args_list:
+                command = call.args[0]
+                self.assertIn('-6', command)
+                self.assertIn('--noproxy', command)
+                self.assertEqual(command[command.index('--interface') + 1], '2409::1')
+
+    def test_probe_rejects_wrong_ipv6_ipv4_and_invalid_response(self):
+        responses = [SimpleNamespace(returncode=0, stdout='2409::2'),
+                     SimpleNamespace(returncode=0, stdout='ip=117.1.2.3\n'),
+                     SimpleNamespace(returncode=0, stdout='not an address')]
+        with patch.object(ddns.subprocess, 'run', side_effect=responses):
+            self.assertFalse(ddns.probe('2409::1'))
+
+    def test_probe_failure_and_address_ambiguity_have_distinct_errors(self):
+        with self.assertRaisesRegex(RuntimeError, '^ipv6_probe_failed$'):
+            ddns.select_verified(['2409::1'], [], [], 'eth0')
+        with self.assertRaisesRegex(RuntimeError, '^ambiguous_verified_ipv6$'):
+            ddns.select_verified(['2409::1','2409::2'], ['2409::1','2409::2'], [], 'eth0')
+
     def test_rejects_unusable_addresses(self):
         infos = []
         for index, flag in enumerate(['temporary', 'tentative', 'deprecated', 'dadfailed'], 1):

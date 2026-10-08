@@ -45,7 +45,8 @@ describe('persisted and ordered host heartbeat', () => {
     expect((await host.fetch(request('/report', report(1, { reportId: 'new-boot-report', bootId: 'boot-2', capturedAt: new Date(now).toISOString() })))).status).toBe(409);
     expect((await host.fetch(request('/report', report(1, { reportId: 'new-boot-report', bootId: 'boot-2' })))).status).toBe(200);
     const snapshot = await (await host.fetch(request())).json() as HostSnapshot;
-    expect(snapshot.ddnsHistory).toHaveLength(2);
+    expect(snapshot.ddnsHistory).toHaveLength(1);
+    expect(snapshot.ddnsHistory[0].count).toBe(2);
   });
   it('serializes simultaneous reports and bounds history', async () => {
     const host = new HostState(hostStore().state, env);
@@ -53,7 +54,27 @@ describe('persisted and ordered host heartbeat', () => {
     expect(responses.every((response) => response.ok)).toBe(true);
     const snapshot = await (await host.fetch(request())).json() as HostSnapshot;
     expect(snapshot.report?.sequence).toBe(40);
-    expect(snapshot.ddnsHistory).toHaveLength(32);
+    expect(snapshot.ddnsHistory).toHaveLength(1);
+    expect(snapshot.ddnsHistory[0].count).toBe(40);
+  });
+  it('migrates old failure windows without refreshing the host and preserves the last successful checkpoint', async () => {
+    const { state, values } = hostStore();
+    const successAt = new Date(now - 2 * 60 * 60 * 1000).toISOString();
+    const receivedAt = new Date(now - HOST_FRESHNESS_MS - 60_000).toISOString();
+    const prior = report(10, { ddns: { name: profile.directHostname, status: 'error', errorCode: 'ipv6_probe_failed',
+      ipv6: '2409::1', currentIpv6: '2409::1', proxied: false, lastSuccessAt: successAt } });
+    values.set('host-state:v1', { report: prior, receivedAt, recentReportIds: [prior.reportId],
+      ddnsHistory: Array.from({ length: 32 }, () => ({ receivedAt, observation: prior.ddns })) });
+    const host = new HostState(state, env);
+    const snapshot = await (await host.fetch(request())).json() as HostSnapshot;
+    expect(snapshot.freshness).toBe('stale');
+    expect(snapshot.receivedAt).toBe(receivedAt);
+    expect(snapshot.report?.sequence).toBe(10);
+    expect(snapshot.ddnsHistory).toHaveLength(2);
+    expect(snapshot.ddnsHistory[0].recovered).toBe(true);
+    expect(snapshot.ddnsAddressHistory?.[0]).toMatchObject({ ipv6: '2409::1', lastSuccessAt: successAt });
+    const restarted = new HostState(state, env);
+    expect(await (await restarted.fetch(request())).json()).toEqual(snapshot);
   });
 });
 

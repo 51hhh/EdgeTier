@@ -3,7 +3,7 @@ import { Badge, Button, Code, Empty, Input, LayerCard, Select, SensitiveInput, S
 import { createRoomRelayToken } from '../api';
 import { downloadConfig } from '../config-download';
 import { createSelectionGuard } from '../room-state';
-import { buildEasyTierConfig, ConfigValidationError, defaultConfigOptions, directProfileAvailable,
+import { buildEasyTierConfig, ConfigValidationError, defaultConfigOptions, directProfileAvailable, directProfileVerified,
   EASYTIER_FLAG_ORDER, type ConfigRelayPeer, type EasyTierConfigOptions, type EasyTierFlag } from '../easytier-config';
 import type { ConfigProfile } from '../../observer/host-types';
 import type { I18nKey, Translator } from '../i18n';
@@ -99,6 +99,7 @@ export function ConfigGenerator({ profiles, t }: { profiles: ConfigProfile[]; t:
 
   if (!profile) return <Empty title={t('config.noProfiles')} description={t('config.noProfilesHelp')} />;
   const directReady = directProfileAvailable(profile, now);
+  const directVerified = directProfileVerified(profile, now);
   const expired = edgePeer && Date.parse(edgePeer.expiresAt) <= now;
 
   return <div className="stack">
@@ -134,11 +135,12 @@ export function ConfigGenerator({ profiles, t }: { profiles: ConfigProfile[]; t:
       </LayerCard.Primary>
     </LayerCard>
     <LayerCard>
-      <LayerCard.Secondary>{t('config.publicPeers')} <Badge variant={directReady ? 'primary' : 'secondary'}>{profile.directHostname}</Badge></LayerCard.Secondary>
+      <LayerCard.Secondary>{t('config.publicPeers')} <Badge variant={directVerified ? 'primary' : 'secondary'}>{profile.directHostname}</Badge></LayerCard.Secondary>
       <LayerCard.Primary>
         <div className="stack compact">
           <Text as="p" variant="secondary">{t('config.directHelp')}</Text>
           {!directReady && <Text as="p" variant="error" role="status">{t('config.directUnavailable')}</Text>}
+          {directReady && !directVerified && <Text as="p" variant="secondary" role="status">{t('config.directUnverified')}</Text>}
           {profile.verifiedAt && <Text as="p" variant="secondary" size="sm">{t('config.verifiedAt', { time: profile.verifiedAt })}</Text>}
           {directReady && <div className="host-endpoints">{profile.directPeers.map((uri) => <code key={uri}>{uri}</code>)}</div>}
         </div>

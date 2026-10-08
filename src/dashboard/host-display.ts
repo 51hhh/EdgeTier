@@ -34,7 +34,7 @@ export function unavailableHostSnapshots(hosts: HostSnapshot[]): HostSnapshot[] 
 
 export function unavailableConfigProfiles(profiles: ConfigProfile[]): ConfigProfile[] {
   return profiles.map((profile) => ({ ...profile, freshness: 'stale', ddnsStatus: 'unknown',
-    directPeers: [], confirmedIpv6: undefined, verifiedAt: undefined, readErrorCode: 'host_state_unavailable' }));
+    directVerification: 'unknown', confirmedIpv6: undefined, verifiedAt: undefined, readErrorCode: 'host_state_unavailable' }));
 }
 
 function sameProfileIdentity(left: HostSnapshot, right: HostSnapshot): boolean {

@@ -191,6 +191,13 @@ class HostRegressions(unittest.TestCase):
                 self.assertTrue(all(service['enabled'] is (state == 'enabled') for service in observations))
                 self.assertTrue(all(service['unitFileState'] == state for service in observations))
 
+    def test_job_results_are_visible_separately_from_active_timers(self):
+        with patch.object(agent, 'run', return_value='ActiveState=failed\nSubState=failed\nUnitFileState=static\nResult=exit-code\nExecMainStatus=1'):
+            rows = {entry['unit']: entry for entry in agent.services()}
+        self.assertEqual(rows['onecloud-ddns.service']['result'], 'exit-code')
+        self.assertEqual(rows['onecloud-ddns.service']['exitCode'], 1)
+        self.assertNotIn('exitCode', rows['onecloud-ddns.timer'])
+
     def collect_fixture(self, peer_count=256, connections=1, node=None):
         node = node or {'peer_id': 123, 'hostname': 'fixture', 'version': '2.6.4', 'listeners': ['udp://[::]:11010'], 'proxy_cidrs': []}
         peers = [{'route': {'peer_id': index, 'hostname': 'peer-' + str(index), 'version': '2.6.4', 'ipv4_addr': '10.144.1.1/24', 'proxy_cidrs': [], 'cost': 1, 'next_hop_peer_id': 1},

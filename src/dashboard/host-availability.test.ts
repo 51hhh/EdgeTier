@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ConfigProfile, HostSnapshot } from '../observer/host-types';
-import { directProfileAvailable } from './easytier-config';
+import { directProfileAvailable, directProfileVerified } from './easytier-config';
 import { mergeHostSnapshots, observedFreshness, unavailableConfigProfiles, unavailableHostSnapshots } from './host-display';
 
 const NOW = Date.parse('2026-10-05T12:00:00Z');
@@ -53,16 +53,18 @@ describe('independent host read availability', () => {
 });
 
 describe('unavailable direct configuration profiles', () => {
-  it('blocks cached direct exports on profile read failure and accepts recovery', () => {
+  it('retains configured hostnames on read failure but removes verification claims', () => {
     const fresh = profile();
     expect(directProfileAvailable(fresh, NOW)).toBe(true);
     const failed = unavailableConfigProfiles([fresh])[0];
-    expect(failed.directPeers).toEqual([]);
+    expect(failed.directPeers).toEqual(fresh.directPeers);
     expect(failed.confirmedIpv6).toBeUndefined();
-    expect(directProfileAvailable(failed, NOW)).toBe(false);
+    expect(directProfileAvailable(failed, NOW)).toBe(true);
+    expect(directProfileVerified(failed, NOW)).toBe(false);
     expect(directProfileAvailable(fresh, NOW)).toBe(true);
   });
   it('gives an explicit read error precedence over otherwise fresh data', () => {
-    expect(directProfileAvailable({ ...profile(), readErrorCode: 'host_state_unavailable' }, NOW)).toBe(false);
+    expect(directProfileAvailable({ ...profile(), readErrorCode: 'host_state_unavailable' }, NOW)).toBe(true);
+    expect(directProfileVerified({ ...profile(), readErrorCode: 'host_state_unavailable' }, NOW)).toBe(false);
   });
 });

@@ -16,10 +16,11 @@ import urllib.parse
 import urllib.request
 import uuid
 
-VERSION = '1.0.1'
+VERSION = '1.0.2'
 MAX_REPORT_BYTES = 64 * 1024
 UNITS = ('easytier-core-home.service', 'easytier-web.service',
-         'edgetier-home-cloudflared.service', 'onecloud-ddns.timer')
+         'edgetier-home-cloudflared.service', 'onecloud-ddns.timer',
+         'onecloud-ddns.service', 'edgetier-host.timer', 'edgetier-host.service')
 DDNS_COMMAND = ('/bin/systemctl', 'start', 'onecloud-ddns.service')
 STATE = Path('/var/lib/edgetier-host/state.json')
 DDNS_STATE = Path('/var/lib/onecloud-ddns/status.json')
@@ -219,12 +220,17 @@ def services():
     for unit in UNITS:
         try:
             fields = dict(line.split('=', 1) for line in run([
-                'systemctl', 'show', unit, '--property=ActiveState,SubState,UnitFileState',
+                'systemctl', 'show', unit, '--property=ActiveState,SubState,UnitFileState,Result,ExecMainStatus',
             ]).splitlines() if '=' in line)
             unit_file_state = fields.get('UnitFileState') or 'unknown'
-            result.append({'unit': unit, 'activeState': fields.get('ActiveState') or 'unknown',
+            item = {'unit': unit, 'activeState': fields.get('ActiveState') or 'unknown',
                            'subState': fields.get('SubState') or 'unknown',
-                           'unitFileState': unit_file_state, 'enabled': unit_file_state == 'enabled'})
+                    'unitFileState': unit_file_state, 'enabled': unit_file_state == 'enabled'}
+            if unit.endswith('.service') and fields.get('Result') and re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,63}', fields['Result']):
+                item['result'] = fields['Result']
+            if unit.endswith('.service') and fields.get('ExecMainStatus', '').isdigit() and int(fields['ExecMainStatus']) <= 255:
+                item['exitCode'] = int(fields['ExecMainStatus'])
+            result.append(item)
         except Exception:
             result.append({'unit': unit, 'activeState': 'unknown', 'subState': 'unknown', 'enabled': False, 'unitFileState': 'unknown'})
     return result

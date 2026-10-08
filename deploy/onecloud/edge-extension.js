@@ -2,7 +2,7 @@ import legacy, { Directory, ConfigServerProbe } from './legacy.js';
 import modern, { RelayRoom, HostState } from './modern.js';
 
 export { RelayRoom, Directory, ConfigServerProbe, HostState };
-export const RELEASE_VERSION = '0.2.1';
+export const RELEASE_VERSION = '0.2.2';
 export const RELAY_IMPLEMENTATION = 'modern';
 
 const REPORT_PATH = /^\/api\/hosts\/[A-Za-z0-9][A-Za-z0-9._-]{0,63}\/report$/;

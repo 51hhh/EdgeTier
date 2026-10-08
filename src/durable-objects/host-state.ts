@@ -1,4 +1,5 @@
-import type { DdnsHistoryEntry, HostCommand, HostProfile, HostReport, HostReportResponse, HostSnapshot } from '../observer/host-types';
+import type { DdnsAddressHistoryEntry, DdnsHistoryEntry, HostCommand, HostProfile, HostReport, HostReportResponse, HostSnapshot } from '../observer/host-types';
+import { appendDdnsHistory, rememberDdnsAddress, restoreDdnsHistory } from '../observer/ddns-history';
 import { HOST_COMMAND_TTL_MS, parseHostProfiles, snapshotFreshness, validateHostReport } from '../observer/host-validation';
 import type { Env } from '../worker/env';
 
@@ -6,12 +7,13 @@ interface PersistedHostState {
   report?: HostReport;
   receivedAt?: string;
   ddnsHistory: DdnsHistoryEntry[];
+  ddnsAddressHistory?: DdnsAddressHistoryEntry[];
+  historyVersion?: 2;
   command?: HostCommand;
   recentReportIds: string[];
 }
 
 const STORAGE_KEY = 'host-state:v1';
-const HISTORY_LIMIT = 32;
 const REPORT_ID_LIMIT = 64;
 
 /** Per-host ordered heartbeat and a single fixed DDNS refresh request. */
@@ -23,7 +25,16 @@ export class HostState implements DurableObject {
   constructor(private readonly state: DurableObjectState, private readonly env: Env) {
     this.ready = this.state.blockConcurrencyWhile(async () => {
       const stored = await this.state.storage.get<PersistedHostState>(STORAGE_KEY);
-      if (stored) this.data = stored;
+      if (stored) {
+        this.data = stored;
+        if (stored.historyVersion !== 2) {
+          this.data.ddnsHistory = restoreDdnsHistory(stored.ddnsHistory, stored.report?.ddns);
+          this.data.ddnsAddressHistory = this.data.ddnsHistory.reduce((ledger, row) => rememberDdnsAddress(ledger, row.observation), stored.ddnsAddressHistory ?? []);
+          if (stored.report) this.data.ddnsAddressHistory = rememberDdnsAddress(this.data.ddnsAddressHistory, stored.report.ddns);
+          this.data.historyVersion = 2;
+          await this.persist();
+        }
+      }
     });
   }
 
@@ -89,7 +100,9 @@ export class HostState implements DurableObject {
     this.data.report = report;
     this.data.receivedAt = new Date(now).toISOString();
     this.data.recentReportIds = [...this.data.recentReportIds, report.reportId].slice(-REPORT_ID_LIMIT);
-    this.data.ddnsHistory = [...this.data.ddnsHistory, { receivedAt: this.data.receivedAt, observation: report.ddns }].slice(-HISTORY_LIMIT);
+    this.data.ddnsHistory = appendDdnsHistory(this.data.ddnsHistory, report.ddns, this.data.receivedAt);
+    this.data.ddnsAddressHistory = rememberDdnsAddress(this.data.ddnsAddressHistory ?? [], report.ddns);
+    this.data.historyVersion = 2;
     await this.persist();
     return Response.json(this.reportResponse(true));
   }
@@ -105,11 +118,12 @@ export class HostState implements DurableObject {
     return { profile, ...this.dataSnapshot(), freshness: snapshotFreshness(this.data.receivedAt, now) };
   }
 
-  private dataSnapshot(): Pick<HostSnapshot, 'report' | 'receivedAt' | 'ddnsHistory' | 'command'> {
+  private dataSnapshot(): Pick<HostSnapshot, 'report' | 'receivedAt' | 'ddnsHistory' | 'ddnsAddressHistory' | 'command'> {
     return {
       ...(this.data.report ? { report: this.data.report } : {}),
       ...(this.data.receivedAt ? { receivedAt: this.data.receivedAt } : {}),
       ddnsHistory: this.data.ddnsHistory,
+      ddnsAddressHistory: this.data.ddnsAddressHistory ?? [],
       ...(this.data.command ? { command: this.data.command } : {}),
     };
   }

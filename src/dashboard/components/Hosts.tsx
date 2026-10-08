@@ -1,6 +1,7 @@
 import React from 'react';
 import { Badge, Button, Empty, LayerCard, Table, Text } from '@cloudflare/kumo';
 import type { HostPeer, HostService, HostSnapshot } from '../../observer/host-types';
+import { successfulDdns } from '../../observer/ddns-history';
 import { formatBytes, formatPercent } from '../format';
 import { commandPending, observedFreshness, reportAgeSeconds } from '../host-display';
 import type { I18nKey, Translator } from '../i18n';
@@ -15,6 +16,12 @@ interface DdnsProps extends HostsProps {
 const SERVICE_LABELS: Record<string, I18nKey> = {
   'easytier-core-home.service': 'services.core', 'easytier-web.service': 'services.web',
   'edgetier-home-cloudflared.service': 'services.tunnel', 'onecloud-ddns.timer': 'services.ddnsTimer',
+  'onecloud-ddns.service': 'services.ddnsJob', 'edgetier-host.timer': 'services.reportTimer',
+  'edgetier-host.service': 'services.reportJob',
+};
+const DDNS_ERROR_LABELS: Record<string, I18nKey> = {
+  ipv6_probe_failed: 'ddns.probeFailed', no_unambiguous_verified_ipv6: 'ddns.probeFailed',
+  ambiguous_verified_ipv6: 'ddns.ambiguousAddress',
 };
 
 function HostHeading({ host, now, t }: { host: HostSnapshot; now: number; t: Translator }) {
@@ -73,6 +80,7 @@ export function DdnsDashboard({ hosts, now, t, requesting, refreshErrors, onRefr
             <Detail label={t('ddns.lastSuccess')} value={ddns.lastSuccessAt} t={t} />
             {ddns.errorCode && <Detail label={t('ddns.errorCode')} value={<code>{ddns.errorCode}</code>} t={t} />}
           </dl>
+          {ddns.errorCode && DDNS_ERROR_LABELS[ddns.errorCode] && <Text as="p" variant="secondary">{t(DDNS_ERROR_LABELS[ddns.errorCode])}</Text>}
         </>}
         <div className="stack compact">
           <div><Button type="button" variant="outline" onClick={() => onRefresh(host.profile.hostId)} disabled={Boolean(requesting[host.profile.hostId]) || pending || Boolean(host.readErrorCode)}>{t(requesting[host.profile.hostId] ? 'ddns.requesting' : 'ddns.refresh')}</Button></div>
@@ -90,11 +98,23 @@ export function DdnsDashboard({ hosts, now, t, requesting, refreshErrors, onRefr
         </div>
         <div className="stack compact">
           <Text as="h3" variant="heading3">{t('ddns.history')}</Text>
+          <Text as="p" variant="secondary" size="sm">{t('ddns.historyHelp')}</Text>
           {!host.ddnsHistory.length ? <Text as="p" variant="secondary">{t('ddns.historyEmpty')}</Text> : <div className="host-table-scroll"><Table>
-            <Table.Header><Table.Row><Table.Head>{t('hosts.received')}</Table.Head><Table.Head>{t('common.status')}</Table.Head><Table.Head>{t('ddns.confirmedIpv6')}</Table.Head><Table.Head>{t('ddns.errorCode')}</Table.Head></Table.Row></Table.Header>
+            <Table.Header><Table.Row><Table.Head>{t('ddns.observedRange')}</Table.Head><Table.Head>{t('common.status')}</Table.Head><Table.Head>{t('ddns.confirmedIpv6')}</Table.Head><Table.Head>{t('ddns.errorCode')}</Table.Head><Table.Head>{t('ddns.observationCount')}</Table.Head></Table.Row></Table.Header>
             <Table.Body>{host.ddnsHistory.slice().reverse().map((item, index) => <Table.Row key={`${item.receivedAt}-${index}`}>
-              <Table.Cell>{item.receivedAt}</Table.Cell><Table.Cell>{t(`ddns.${item.observation.status}`)}</Table.Cell>
+              <Table.Cell><div className="stack compact"><span>{item.firstReceivedAt ?? item.receivedAt}</span>{item.firstReceivedAt && item.firstReceivedAt !== item.receivedAt && <span>→ {item.receivedAt}</span>}{item.recovered && <small>{t('ddns.historyRecovered')}</small>}</div></Table.Cell><Table.Cell>{t(successfulDdns(item.observation) ? 'ddns.historySuccess' : `ddns.${item.observation.status}`)}</Table.Cell>
               <Table.Cell>{item.observation.ipv6 ?? t('common.notObserved')}</Table.Cell><Table.Cell>{item.observation.errorCode ?? '—'}</Table.Cell>
+              <Table.Cell>{item.count ?? 1}</Table.Cell>
+            </Table.Row>)}</Table.Body>
+          </Table></div>}
+        </div>
+        <div className="stack compact">
+          <Text as="h3" variant="heading3">{t('ddns.addressHistory')}</Text>
+          <Text as="p" variant="secondary" size="sm">{t('ddns.addressHistoryHelp')}</Text>
+          {!host.ddnsAddressHistory?.length ? <Text as="p" variant="secondary">{t('ddns.historyEmpty')}</Text> : <div className="host-table-scroll"><Table>
+            <Table.Header><Table.Row><Table.Head>IPv6</Table.Head><Table.Head>{t('ddns.firstSuccess')}</Table.Head><Table.Head>{t('ddns.lastSuccess')}</Table.Head><Table.Head>{t('ddns.successCount')}</Table.Head></Table.Row></Table.Header>
+            <Table.Body>{host.ddnsAddressHistory.slice().reverse().map((item) => <Table.Row key={item.ipv6}>
+              <Table.Cell><code>{item.ipv6}</code></Table.Cell><Table.Cell>{item.firstSuccessAt}</Table.Cell><Table.Cell>{item.lastSuccessAt}</Table.Cell><Table.Cell>{item.successCount}</Table.Cell>
             </Table.Row>)}</Table.Body>
           </Table></div>}
         </div>
@@ -143,12 +163,13 @@ export function HostServices({ hosts, now, t }: HostsProps) {
 function ServiceTable({ services, t }: { services: HostService[]; t: Translator }) {
   if (!services.length) return <Text as="p" variant="secondary">{t('services.noServices')}</Text>;
   return <div className="host-table-scroll"><Table>
-    <Table.Header><Table.Row><Table.Head>{t('services.unit')}</Table.Head><Table.Head>{t('services.activeState')}</Table.Head><Table.Head>{t('services.subState')}</Table.Head><Table.Head>{t('services.enabled')}</Table.Head><Table.Head>{t('services.unitFileState')}</Table.Head></Table.Row></Table.Header>
+    <Table.Header><Table.Row><Table.Head>{t('services.unit')}</Table.Head><Table.Head>{t('services.activeState')}</Table.Head><Table.Head>{t('services.subState')}</Table.Head><Table.Head>{t('services.enabled')}</Table.Head><Table.Head>{t('services.unitFileState')}</Table.Head><Table.Head>{t('services.lastResult')}</Table.Head></Table.Row></Table.Header>
     <Table.Body>{services.map((service) => <Table.Row key={service.unit}>
       <Table.Cell><div className="stack compact"><span>{SERVICE_LABELS[service.unit] ? t(SERVICE_LABELS[service.unit]) : service.unit}</span><code>{service.unit}</code></div></Table.Cell>
       <Table.Cell><Badge variant={service.activeState === 'active' ? 'primary' : service.activeState === 'failed' ? 'error' : 'secondary'}>{service.activeState}</Badge></Table.Cell>
       <Table.Cell>{service.subState}</Table.Cell><Table.Cell>{t(service.enabled ? 'services.yes' : 'services.no')}</Table.Cell>
       <Table.Cell>{service.unitFileState ? <code>{service.unitFileState}</code> : t('common.notObserved')}</Table.Cell>
+      <Table.Cell><div className="stack compact">{service.result && <Badge variant={service.result === 'success' && (!service.exitCode || service.exitCode === 0) ? 'primary' : 'error'}>{service.result}</Badge>}{service.exitCode !== undefined && <small>{t('services.exitCode', { code: service.exitCode })}</small>}{!service.result && service.exitCode === undefined && t('common.notObserved')}</div></Table.Cell>
     </Table.Row>)}</Table.Body>
   </Table></div>;
 }

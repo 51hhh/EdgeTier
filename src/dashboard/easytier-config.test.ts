@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ConfigProfile } from '../observer/host-types';
-import { buildEasyTierConfig, defaultConfigOptions, directProfileAvailable, relayPeerValid, validStaticIpv4 } from './easytier-config';
+import { buildEasyTierConfig, defaultConfigOptions, directProfileAvailable, directProfileVerified, relayPeerValid, validStaticIpv4 } from './easytier-config';
 
 const NOW = Date.parse('2026-10-05T12:00:00Z');
 const profile: ConfigProfile = {
@@ -33,11 +33,20 @@ describe('EasyTier 2.6.4 client config', () => {
     expect(() => buildEasyTierConfig({ ...base(), includePublicUdpPeer: false, includePublicTcpPeer: false }, NOW)).toThrow('noPeers');
   });
 
-  it('invalidates saved direct profiles after verification ages out or current status fails', () => {
-    expect(directProfileAvailable(profile, NOW + 300_000)).toBe(false);
-    expect(directProfileAvailable({ ...profile, ddnsStatus: 'error' }, NOW)).toBe(false);
-    expect(() => buildEasyTierConfig({ ...base(), profile: { ...profile, freshness: 'stale' } }, NOW)).toThrow('directUnavailable');
-    expect(() => buildEasyTierConfig(base(), NOW + 300_000)).toThrow('directUnavailable');
+  it('exports configured hostnames during DDNS failure or stale telemetry without claiming verification', () => {
+    for (const state of [
+      { ...profile, ddnsStatus: 'error' as const },
+      { ...profile, freshness: 'stale' as const },
+      { ...profile, readErrorCode: 'host_state_unavailable' as const, confirmedIpv6: undefined },
+      { ...profile, verifiedAt: new Date(NOW - 600_000).toISOString() },
+    ]) {
+      expect(directProfileAvailable(state, NOW)).toBe(true);
+      expect(directProfileVerified(state, NOW)).toBe(false);
+      const config = buildEasyTierConfig({ ...base(), profile: state }, NOW);
+      expect(config).toContain('uri = "tcp://ip.example.org:11010"');
+      expect(config).toContain('DDNS is not currently verified');
+    }
+    expect(directProfileVerified(profile, NOW)).toBe(true);
   });
 
   it('checks the direct endpoint host, port and credentials and requires IPv6', () => {

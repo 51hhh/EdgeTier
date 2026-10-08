@@ -98,10 +98,10 @@ describe('DDNS-backed config profiles', () => {
     state.report!.ddns.currentIpv6 = '2001:db8:0:0:0:0:0:1';
     expect(configProfile(state, now)).toMatchObject({ roomId: 'room-home', networkName: 'home-mesh', directPeers: ['udp://home.example.com:11010', 'tcp://home.example.com:11010'], confirmedIpv6: ipv6, ipv6Only: true });
   });
-  it('blocks a read-failed profile even when a prior successful report is retained', () => {
-    expect(configProfile({ ...snapshot(), readErrorCode: 'host_state_unavailable' }, now)).toMatchObject({ readErrorCode: 'host_state_unavailable', freshness: 'never', ddnsStatus: 'unknown', directPeers: [] });
+  it('retains configured hostnames when report state cannot be read', () => {
+    expect(configProfile({ ...snapshot(), readErrorCode: 'host_state_unavailable' }, now)).toMatchObject({ readErrorCode: 'host_state_unavailable', freshness: 'never', ddnsStatus: 'unknown', directPeers: ['udp://home.example.com:11010', 'tcp://home.example.com:11010'] });
   });
-  it('blocks direct peers for stale, failed, unconfirmed or mismatched records', () => {
+  it('exports configured hostnames with truthful failed, stale or mismatch verification', () => {
     const bad: HostSnapshot[] = [
       { ...snapshot(), receivedAt: new Date(now - HOST_FRESHNESS_MS - 1).toISOString() },
       { ...snapshot(), report: { ...report(), ddns: { ...report().ddns, status: 'error' } } },
@@ -111,7 +111,12 @@ describe('DDNS-backed config profiles', () => {
       { ...snapshot(), report: { ...report(), ddns: { ...report().ddns, name: 'other.example.com' } } },
       { ...snapshot(), report: { ...report(), ddns: { ...report().ddns, currentIpv6: undefined } } },
     ];
-    for (const state of bad) expect(configProfile(state, now).directPeers).toEqual([]);
-    expect(configProfile({ profile, freshness: 'never', ddnsHistory: [] }, now)).toMatchObject({ freshness: 'never', ddnsStatus: 'unknown', directPeers: [] });
+    for (const state of bad) {
+      const result = configProfile(state, now);
+      expect(result.directPeers).toEqual(['udp://home.example.com:11010', 'tcp://home.example.com:11010']);
+      expect(result.confirmedIpv6).toBeUndefined();
+      expect(result.directVerification).not.toBe('verified');
+    }
+    expect(configProfile({ profile, freshness: 'never', ddnsHistory: [] }, now)).toMatchObject({ freshness: 'never', ddnsStatus: 'unknown', directPeers: ['udp://home.example.com:11010', 'tcp://home.example.com:11010'] });
   });
 });

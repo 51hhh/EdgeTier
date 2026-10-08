@@ -7,6 +7,7 @@ export const HOST_COMMAND_TTL_MS = 10 * 60 * 1000;
 export const HOST_SERVICE_UNITS = new Set([
   'easytier-core-home.service', 'easytier-web.service',
   'edgetier-home-cloudflared.service', 'onecloud-ddns.timer',
+  'onecloud-ddns.service', 'edgetier-host.timer', 'edgetier-host.service',
 ]);
 
 type ObjectValue = Record<string, unknown>;
@@ -108,10 +109,11 @@ export function validateHostReport(value: unknown, hostId: string, now = Date.no
     || !optional(ddns.proxied, (v) => typeof v === 'boolean')
     || !optional(ddns.lastAttemptAt, (v) => timelyDate(v, now)) || !optional(ddns.lastSuccessAt, (v) => timelyDate(v, now))
     || !optional(ddns.errorCode, code)) return null;
-  if (!array(value.services, 4, (service) => object(service, ['unit', 'activeState', 'subState', 'enabled', 'unitFileState'])
+  if (!array(value.services, HOST_SERVICE_UNITS.size, (service) => object(service, ['unit', 'activeState', 'subState', 'enabled', 'unitFileState', 'result', 'exitCode'])
     && typeof service.unit === 'string' && HOST_SERVICE_UNITS.has(service.unit)
     && code(service.activeState) && code(service.subState) && typeof service.enabled === 'boolean'
     && optional(service.unitFileState, code)
+    && optional(service.result, code) && optional(service.exitCode, (v) => integer(v, 255))
     && (service.unitFileState === undefined || service.enabled === (service.unitFileState === 'enabled')))) return null;
   const units = (value.services as ObjectValue[]).map((service) => service.unit);
   if (new Set(units).size !== units.length) return null;
@@ -160,13 +162,21 @@ export function configProfile(snapshot: HostSnapshot, now = Date.now()): ConfigP
     && ddns.proxied === false && ddns.ipv6 && validIpv6(ddns.ipv6, true)
     && ddns.currentIpv6 && canonicalIpv6(ddns.ipv6) === canonicalIpv6(ddns.currentIpv6)
     && verifiedAge >= 0 && verifiedAge <= HOST_FRESHNESS_MS;
+  const mismatch = ddns && (ddns.name.toLowerCase() !== snapshot.profile.directHostname.toLowerCase()
+    || ddns.proxied === true || ddns.ipv6 && ddns.currentIpv6 && canonicalIpv6(ddns.ipv6) !== canonicalIpv6(ddns.currentIpv6));
+  const directVerification: ConfigProfile['directVerification'] = confirmed ? 'verified'
+    : mismatch ? 'mismatch' : ddns?.status === 'error' ? 'failed'
+    : ddns?.lastSuccessAt ? 'stale' : 'unknown';
   return {
     ...snapshot.profile,
     freshness: snapshot.readErrorCode ? 'never' : snapshotFreshness(snapshot.receivedAt, now),
     ...(snapshot.readErrorCode ? { readErrorCode: snapshot.readErrorCode } : {}),
     ddnsStatus: ddns?.status ?? 'unknown',
     ...(confirmed ? { confirmedIpv6: ddns.ipv6, verifiedAt: ddns.lastSuccessAt } : {}),
-    directPeers: confirmed ? [`udp://${snapshot.profile.directHostname}:${snapshot.profile.directPort}`, `tcp://${snapshot.profile.directHostname}:${snapshot.profile.directPort}`] : [],
+    // Export describes configured identity/endpoints, not a reachability promise.
+    // Temporary telemetry/DNS errors remain visible without disabling a valid file.
+    directPeers: [`udp://${snapshot.profile.directHostname}:${snapshot.profile.directPort}`, `tcp://${snapshot.profile.directHostname}:${snapshot.profile.directPort}`],
+    directVerification,
     ipv6Only: true,
   };
 }

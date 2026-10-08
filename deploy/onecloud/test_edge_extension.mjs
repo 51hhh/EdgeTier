@@ -247,9 +247,9 @@ test('health has release version and combined capabilities while retaining legac
   const f = await environment();
   const response = await entry.default.fetch(request(f,'/api/health'),f.env,f.ctx);
   const health = await response.json();
-  assert.equal(health.version,'0.2.1');
+  assert.equal(health.version,'0.2.2');
   assert.equal(health.relayImplementation,'modern');
-  assert.equal(entry.RELEASE_VERSION,'0.2.1');
+  assert.equal(entry.RELEASE_VERSION,'0.2.2');
   assert.ok(health.capabilities.includes('official-web-bridge'));
   assert.ok(health.capabilities.includes('relay-lifecycle'));
   assert.ok(!health.capabilities.includes('legacy-relay-recovery'));

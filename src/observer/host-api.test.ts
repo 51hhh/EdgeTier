@@ -115,7 +115,7 @@ describe('host HTTP input limits and empty configuration', () => {
       expect(profilesResponse.status).toBe(200);
       const profiles = (await profilesResponse.json() as { profiles: unknown[] }).profiles;
       expect(profiles[0]).toMatchObject({ hostId: profile.hostId, freshness: 'fresh', directPeers: ['udp://home.example.com:11010', 'tcp://home.example.com:11010'] });
-      expect(profiles[1]).toMatchObject({ hostId: otherProfile.hostId, freshness: 'never', ddnsStatus: 'unknown', directPeers: [], readErrorCode: 'host_state_unavailable' });
+      expect(profiles[1]).toMatchObject({ hostId: otherProfile.hostId, freshness: 'never', ddnsStatus: 'unknown', directPeers: [`udp://${otherProfile.directHostname}:${otherProfile.directPort}`, `tcp://${otherProfile.directHostname}:${otherProfile.directPort}`], readErrorCode: 'host_state_unavailable', directVerification: 'unknown' });
       expect(JSON.stringify(hosts)).not.toContain('private failure');
     }
   });

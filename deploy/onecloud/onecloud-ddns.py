@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Maintain OneCloud's DNS-only AAAA using a verified eth0 IPv6 address."""
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import fcntl
 import ipaddress
@@ -77,6 +78,8 @@ def candidates(interfaces, interface):
 
 def select_verified(addresses, verified, routes, interface):
     eligible = set(addresses).intersection(verified)
+    if not eligible:
+        raise RuntimeError('ipv6_probe_failed')
     if len(eligible) == 1:
         return eligible.pop()
     sources = set()
@@ -90,22 +93,36 @@ def select_verified(addresses, verified, routes, interface):
                 sources.add(source)
     if len(sources) == 1:
         return sources.pop()
-    raise RuntimeError('no_unambiguous_verified_ipv6')
+    raise RuntimeError('ambiguous_verified_ipv6')
+
+
+PROBE_ENDPOINTS = (
+    ('https://api6.ipify.org', 'plain'),
+    ('https://www.cloudflare.com/cdn-cgi/trace', 'trace'),
+    ('https://ipv6.icanhazip.com', 'plain'),
+)
 
 
 def probe(address):
-    result = subprocess.run([
-        'curl', '--noproxy', '*', '-6', '--interface', address,
-        '--connect-timeout', '5', '--max-time', '12', '-fsS',
-        'https://www.cloudflare.com/cdn-cgi/trace',
-    ], capture_output=True, text=True, timeout=15)
-    if result.returncode:
-        return False
-    values = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
-    try:
-        return ipaddress.ip_address(values.get('ip', '')) == ipaddress.ip_address(address)
-    except ValueError:
-        return False
+    # Each endpoint must observe the exact bound IPv6 source. A failed endpoint
+    # cannot veto a successful independent check; IPv4/proxy responses never pass.
+    for url, response_format in PROBE_ENDPOINTS:
+        try:
+            result = subprocess.run([
+                'curl', '--noproxy', '*', '-6', '--interface', address,
+                '--connect-timeout', '5', '--max-time', '12', '--max-filesize', '4096', '-fsS', url,
+            ], capture_output=True, text=True, timeout=15)
+            if result.returncode or len(result.stdout) > 4096:
+                continue
+            value = result.stdout.strip()
+            if response_format == 'trace':
+                values = dict(line.split('=', 1) for line in value.splitlines() if '=' in line)
+                value = values.get('ip', '')
+            if ipaddress.ip_address(value) == ipaddress.ip_address(address):
+                return True
+        except (ValueError, OSError, subprocess.TimeoutExpired):
+            continue
+    return False
 
 
 def api(config, path, method='GET', payload=None):
@@ -181,7 +198,11 @@ def main():
             addresses = candidates(run_json(['ip', '-j', '-6', 'addr', 'show', 'dev', interface]), interface)
             if not addresses or len(addresses) > 8:
                 raise RuntimeError('invalid_ipv6_candidate_count')
-            verified = [address for address in addresses if probe(address)]
+            # At most four curl processes: eight candidates and three bounded
+            # fallbacks finish inside the systemd/command deadline even on outage.
+            with ThreadPoolExecutor(max_workers=min(4, len(addresses))) as executor:
+                results = list(executor.map(probe, addresses))
+            verified = [address for address, ok in zip(addresses, results) if ok]
             routes = run_json(['ip', '-j', '-6', 'route', 'get', '2606:4700:4700::1111'])
             address = select_verified(addresses, verified, routes, interface)
             if args.check:
