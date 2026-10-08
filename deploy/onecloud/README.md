@@ -13,7 +13,7 @@ The adapter reports sanitized DDNS, systemd and EasyTier2.6.4 observations to th
 | /var/lib/edgetier-host/state.json | Boot sequence, execution intent and acknowledgement retry journal; root0600 |
 | edgetier-host.timer | OnUnitInactiveSec60s plus up to5s jitter and AccuracySec1s, so execution time adds to the interval |
 
-Collector 1.0.1 preserves DDNS, service observations and command acknowledgement within the exact compact JSON 64 KiB upload budget. Optional topology is bounded to 256 peers, 16 connections/listeners and 32 proxy CIDRs. Whole excess peers are omitted with `easytier.truncated:true` and a positive `omittedPeers` count; list-only reduction uses the flag alone. Peer counts are the displayed subset when truncation is present. Raw systemd `unitFileState` is retained; `enabled` means permanently enabled, while static/runtime units do not guarantee persistent startup.
+Collector 1.0.2 preserves DDNS, service observations and command acknowledgement within the exact compact JSON 64 KiB upload budget. Optional topology is bounded to 256 peers, 16 connections/listeners and 32 proxy CIDRs. Whole excess peers are omitted with `easytier.truncated:true` and a positive `omittedPeers` count; list-only reduction uses the flag alone. Peer counts are the displayed subset when truncation is present. Raw systemd `unitFileState` is retained; `enabled` means permanently enabled, while static/runtime units do not guarantee persistent startup.
 
 The oneshot limit is 600 seconds, covering the 500-second permitted collection/upload/refresh/follow-up path. The ten-minute command lifetime remains independent and is enforced by the Worker. Deploy the modern Worker validation before collector 1.0.1; the added fields are optional so previous reports continue to work. No HostState migration is required.
 
@@ -39,11 +39,11 @@ smoltcp restored LAN Web access while keeping the host firewall's routed-deny po
 
 The only remotely queued operation is ddns-refresh. It calls exactly /bin/systemctl start onecloud-ddns.service; systemd waits for/coalesces an already-running timer update. Calling a second writer directly would fail the writer's nonblocking lock during timer overlap. No arbitrary unit, shell command, file path or EasyTier child configuration is accepted.
 
-The agent persists execution intent before dispatch and completion before acknowledgement upload. After an interrupted process it reports execution_interrupted rather than blindly executing twice. HTTP retry acknowledges the same completed command. Backend commands expire after10minutes; one pending command is retained per host. A failed host read in an aggregate response carries `readErrorCode:host_state_unavailable` while healthy hosts remain available; the failed profile has no direct peers. Reports older than5minutes are stale, and stale/provider-failed/address-mismatched profiles cannot generate verified direct peers.
+The agent persists execution intent before dispatch and completion before acknowledgement upload. After an interrupted process it reports execution_interrupted rather than blindly executing twice. HTTP retry acknowledges the same completed command. Backend commands expire after10minutes; one pending command is retained per host. A failed host read carries `readErrorCode:host_state_unavailable` while healthy hosts remain available. Profiles retain configured direct hostnames for export; verification is advisory and never claimed for stale/provider-failed/address-mismatched data. Reports older than5minutes are stale. DDNS history groups equal consecutive observations into up to64 state segments; a separate ledger keeps the latest16 successful IPv6 addresses. Migration retains the last successful checkpoint without refreshing host receipt time. Collector1.0.2 includes DDNS/report jobs and their timers, plus last execution result and exit code for jobs.
 
 ## Production source and adapter ownership
 
-The GitHub baseline predates the deployed v2 official EasyTier Web/VPC bridge and ConfigServerProbe. The root-private legacy module remains necessary; never copy it or resident credentials into Git. Release 0.2.1 exports the repaired modern RelayRoom under the same existing class/binding name, plus modern HostState. Directory and ConfigServerProbe remain legacy exports. There is no namespace replacement or migration in this code-only release.
+The GitHub baseline predates the deployed v2 official EasyTier Web/VPC bridge and ConfigServerProbe. The root-private legacy module remains necessary; never copy it or resident credentials into Git. Release 0.2.2 exports the repaired modern RelayRoom under the same existing class/binding name, plus modern HostState. Directory and ConfigServerProbe remain legacy exports. There is no namespace replacement or migration in this code-only release.
 
 Legacy retains public /ws and /config-server/ws admission, management hostname and Cloudflare Access validation, login/logout/cookies, room/default-room handlers, dashboard assets, official Web bridge and unknown/extended routes. Its room/WS handlers reach the repaired class through the unchanged RELAY_ROOM binding. The adapter turns only URIError on legacy room paths into a controlled 400. Protected modern host/profile handlers first call authoritative legacy /api/auth/me with the same origin and headers, then apply their existing cookie validation. Only the fixed, host-scoped bearer report route is exempt. Do not replace the legacy management gate with a cookie-only handler or guess its Access internals.
 
@@ -58,14 +58,14 @@ rollout-edgetier.py is a OneCloud-local adapter for this deployment. The initial
 ### 2. Signatures
 
 ```text
-python3 rollout-edgetier.py --backup <root-private-baseline> --bundle <release-bundle> --release-version 0.2.1 --code-only
-python3 rollout-edgetier.py --backup <root-private-baseline> --bundle <recovery-bundle> --release-version 0.2.1 --code-only --forward-recovery
+python3 rollout-edgetier.py --backup <root-private-baseline> --bundle <release-bundle> --release-version 0.2.2 --code-only
+python3 rollout-edgetier.py --backup <root-private-baseline> --bundle <recovery-bundle> --release-version 0.2.2 --code-only --forward-recovery
 ```
 
 A normal bundle contains client/, modern.js, edge-extension.js and release.json:
 
 ```json
-{"version":"0.2.1","target":"edgetier","relayImplementation":"modern"}
+{"version":"0.2.2","target":"edgetier","relayImplementation":"modern"}
 ```
 
 ### 3. Contracts
